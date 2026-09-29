@@ -18,10 +18,19 @@ RD_Config.lua
 RD_Init.lua
 
 # UI Framework
+RD_UI_Utils_Helpers.lua
 RD_UI_Utils.lua
+RD_UI_Utils_LinkInsert.lua
 RD_UI_Layout.lua
+RD_UI_Widgets_Scroll.lua
+RD_UI_Widgets_Dropdown.lua
 RD_UI_Widgets.lua
+RD_UI_Widgets_Drag.lua
 RD_UI_Widgets_Color.lua
+RD_UI_Widgets_IconPicker.lua
+RD_UI_Widgets_IconTabs.lua
+RD_UI_Widgets_ItemGrid.lua
+RD_UI_Widgets_ItemSearch.lua
 RD_UI_Widgets_List.lua
 RD_UI_Widgets_ContentList.lua
 RD_UI_Widgets_Bands.lua
@@ -30,6 +39,8 @@ RD_UI_MenuFactory.lua
 RD_UI_MenuFrame.lua
 RD_UI_MenuFrame_Announce.lua
 RD_UI_ConfigWindow.lua
+RD_UI_ConfigWindow_Tabs.lua
+RD_UI_ConfigWindow_Bar.lua
 RD_UI_ConfigWindow_Render.lua
 RD_UI_Dialogs.lua
 RD_UI_MinimapButton.lua
@@ -37,6 +48,12 @@ RD_UI_BandsWindow.lua
 RD_UI_BandsList.lua
 RD_UI_BandsStatus.lua
 RD_UI_BandsPlayerEditor.lua
+RD_UI_BandsPlayerEditor_Sections.lua
+RD_UI_BandsPlayerEditor_Sections_Grids.lua
+RD_UI_BandsPlayerEditor_Sections_Currencies.lua
+RD_UI_BandsPlayerEditor_Sections_Instances.lua
+RD_UI_PlayerWindow.lua
+RD_UI_SpammerWindowCore.lua
 RD_UI_SpammerWindow.lua
 RD_UI_SpammerWindow_Control.lua
 RD_UI_RulesSpammerWindow.lua
@@ -45,6 +62,7 @@ RD_UI_LootWindow_History.lua
 
 # Módulos funcionales
 RD_Module_MessageManager.lua
+RD_Module_Communication_Codec.lua
 RD_Module_Communication.lua
 RD_Module_ReadyCheck.lua
 RD_Module_AuraClick.lua
@@ -52,14 +70,24 @@ RD_Module_RosterWatch.lua
 RD_Utils_Assignments.lua
 RD_Utils_Migrations.lua
 RD_Utils_Characters.lua
+RD_Utils_Currencies.lua
+RD_Utils_ItemGoals.lua
 RD_Utils_Bands.lua
+RD_Utils_Players.lua
 RD_Utils_Registry.lua
 RD_Module_Spammer.lua
 RD_Module_RulesSpammer.lua
+RD_Module_LootCore.lua
 RD_Module_Loot.lua
+RD_Module_AutoLootCore.lua
+RD_Module_AutoLootMaster.lua
+RD_Module_AutoLoot.lua
+RD_Module_ItemGoalsWatch.lua
+RD_Module_DBMTimer.lua
 
 # Menu Actions (después de la UI)
 RD_MenuActions.lua
+RD_Module_ActionBarHelpers.lua
 RD_Module_ActionBar.lua
 
 # TODO v3: Módulos funcionales (se portan de la v2 en iteraciones posteriores)

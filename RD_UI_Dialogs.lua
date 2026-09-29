@@ -15,6 +15,29 @@ _G.RaidDominion = RD
 
 local Dialogs = {}
 
+-- ESC en un popup con EditBox: el comportamiento estándar de WoW limpia el
+-- texto en la primera pulsación y solo cierra con una segunda ESC. Para que el
+-- popup de Discord (y los de entrada de segundos) sean escapables de una sola
+-- pulsación se reemplaza el OnEscapePressed del editbox compartido mientras
+-- RD_INPUT está visible, y se restaura el original al ocultarse (no debe
+-- filtrarse a otros popups que reutilicen ese editbox).
+local inputEscapeOriginal = nil
+local escOnCancelFired = false
+local function InputEscapeHook(editBox)
+    editBox:SetScript("OnEscapePressed", inputEscapeOriginal)
+    local dlg = StaticPopupDialogs and StaticPopupDialogs["RD_INPUT"]
+    local onCancel = dlg and dlg.OnCancel
+    -- El cierre por ESC debe ejecutar SIEMPRE el OnCancel del diálogo (p.ej. el
+    -- DBM "PULL CANCELADO" del pull), incluso si el cliente no lo dispara en el
+    -- hide. El flag evita duplicarlo si StaticPopup_Hide ya lo notificó.
+    escOnCancelFired = false
+    StaticPopup_Hide("RD_INPUT")
+    if onCancel and not escOnCancelFired then
+        escOnCancelFired = true
+        pcall(onCancel)
+    end
+end
+
 -- Diálogo de confirmación (estilo base v2)
 function Dialogs:ShowConfirmDialog(options)
     if not options or not options.text then return end
@@ -42,13 +65,31 @@ function Dialogs:ShowInputDialog(options)
         hasEditBox = true,
         maxLetters = options.maxLetters or 255,
         OnShow = function(self)
+            if self.editBox then
+                -- Capturar el handler original solo la primera vez; en las
+                -- siguientes muestras ya es el default de nuevo (se restauró).
+                if not inputEscapeOriginal then
+                    inputEscapeOriginal = self.editBox:GetScript("OnEscapePressed")
+                end
+                self.editBox:SetScript("OnEscapePressed", InputEscapeHook)
+            end
             if options.onShow then options.onShow(self) end
+        end,
+        OnHide = function(self)
+            -- Restaurar el OnEscapePressed original al cerrar (Guardar/Cancelar)
+            -- para no dejar el hook en el editbox compartido de StaticPopup.
+            if self.editBox and inputEscapeOriginal then
+                if self.editBox:GetScript("OnEscapePressed") == InputEscapeHook then
+                    self.editBox:SetScript("OnEscapePressed", inputEscapeOriginal)
+                end
+            end
         end,
         OnAccept = function(self)
             local value = self.editBox and self.editBox:GetText() or ""
             if options.onAccept then options.onAccept(value) end
         end,
         OnCancel = function(self)
+            escOnCancelFired = true
             if options.onCancel then options.onCancel() end
         end,
         timeout = 0,
@@ -74,7 +115,11 @@ function Dialogs:ShowDiscordEditPopup()
         end,
         onAccept = function(value)
             if RD.config and RD.config.Set then
-                RD.config:Set("chat.discordLink", tostring(value or ""))
+                -- Sanea y acota el enlace (se envía por whisper/chat): sin
+                -- caracteres de control y con tope de 120 chars.
+                local v = tostring(value or ""):gsub("[%c]", " "):gsub("^%s*(.-)%s*$", "%1")
+                if #v > 120 then v = v:sub(1, 120):gsub("[\128-\191]*$", "") end
+                RD.config:Set("chat.discordLink", v)
             end
         end,
     })

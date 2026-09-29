@@ -1,13 +1,19 @@
 --[[
     RD_UI_MinimapButton.lua
-    PROPÓSITO: Botón de minimapa (versión mejorada, similar al addon base v2).
-              Clic izquierdo: alterna el menú flotante. Clic derecho: menú
-              contextual (Configuración / Gestor de botín / Recoger items /
-              Spamear reglas / Spamear banda / Mover / Recargar UI). Los ítems
-              de botín y spam solo aparecen cuando están disponibles. Se
-              arrastra alrededor del minimapa manteniendo Alt; la posición
-              angular se guarda en config (ui.minimap.position). Sin OnUpdate
-              continuo: solo se activa un OnUpdate mientras se arrastra.
+PROPÓSITO: Botón de minimapa (versión mejorada, similar al addon base v2).
+               Clic izquierdo: alterna el menú flotante. Clic derecho: menú
+               contextual (Nombre propio / Jugador / Configuración / Gestor de
+               botín / Recoger ítems / Spamear reglas / Spamear banda /
+               Recargar UI). "Nombre propio" abre el editor del personaje actual
+               en modo "mismo" (con las secciones solo-uno-mismo); "Jugador"
+               abre el buscador de jugadores. Los ítems de botín y spam solo
+               aparecen cuando están disponibles. Se arrastra alrededor del
+               minimapa manteniendo Alt; la posición angular se guarda en config
+               (ui.minimap.position). El tooltip (OnEnter) muestra los bloques
+               de SEGUIMIENTO (objetos, monedas e instancias) solo cuando hay
+               datos — el de instancias respeta el check general de la sección
+               Instancias. Sin OnUpdate continuo: solo se activa un OnUpdate
+               mientras se arrastra.
     API PÚBLICA:
         - RD.ui.minimapButton:Initialize()
         - RD.ui.minimapButton:Show() / Hide() / Toggle()
@@ -69,6 +75,30 @@ local function OpenConfigGeneral()
     end
 end
 
+-- "Nombre propio": abre el editor de jugador sobre el personaje actual. Se pasa
+-- playerName para que el editor resuelva la banda donde figure (o abra en modo
+-- "sin banda") y calcule isSelf=true, habilitando las secciones solo-uno-mismo
+-- (Equipamiento, Instancias, Monedas).
+local function OpenSelfPlayer()
+    local pe = RD.ui and RD.ui.playerEditor
+    if not pe or not pe.OpenPlayerEditor then return end
+    local name
+    if UnitName then name = UnitName("player") end
+    if name and name ~= "" then
+        pcall(pe.OpenPlayerEditor, pe, { playerName = name })
+    end
+end
+
+-- "Jugador": abre (o cierra) la ventana buscador de jugadores, igual que el
+-- clic derecho del botón "Jugador" de la barra inferior (HandlePlayerFinder ->
+-- playerWindow:Toggle).
+local function OpenPlayerFinder()
+    local pw = RD.ui and RD.ui.playerWindow
+    if pw and pw.Toggle then
+        pcall(pw.Toggle, pw)
+    end
+end
+
 -- Arrastre: sigue el cursor alrededor del minimapa. Solo activo durante el
 -- arrastre (se limpia el OnUpdate al soltar o si se suelta Alt).
 local function DragUpdate(self)
@@ -107,11 +137,29 @@ local function OpenContextMenu()
     if not MinimapButton.menuFrame then
         MinimapButton.menuFrame = CreateFrame("Frame", "RaidDominionMinimapMenu", UIParent, "UIDropDownMenuTemplate")
     end
-    local items = {
-        { text = "Configuración", func = function()
-            OpenConfigGeneral()
-        end },
-    }
+    local items = {}
+
+    -- Nombre del personaje propio: abre el editor en modo "mismo". Se lee en
+    -- cada apertura del menú (así sigue correcto al cambiar de personaje) y se
+    -- omite si no hay nombre o el editor no está cargado.
+    local selfName
+    if UnitName then selfName = UnitName("player") end
+    local pe = RD.ui and RD.ui.playerEditor
+    if selfName and selfName ~= "" and pe and pe.OpenPlayerEditor then
+        items[#items + 1] = { text = selfName, func = function()
+            OpenSelfPlayer()
+        end }
+    end
+    -- "Jugador": buscador de jugadores de las listas/bandas.
+    local pw = RD.ui and RD.ui.playerWindow
+    if pw and pw.Toggle then
+        items[#items + 1] = { text = "Jugador", func = function()
+            OpenPlayerFinder()
+        end }
+    end
+    items[#items + 1] = { text = "Configuración", func = function()
+        OpenConfigGeneral()
+    end }
 
     -- Acciones de botín y spammers: se añaden solo cuando están disponibles
     -- (cada una guarda por la existencia de su módulo/ventana; "Spamear banda"
@@ -125,7 +173,7 @@ local function OpenContextMenu()
     end
     local loot = RD.modules and RD.modules.loot
     if loot and loot.CollectItems then
-        items[#items + 1] = { text = "Recoger items", func = function()
+        items[#items + 1] = { text = "Recoger ítems", func = function()
             loot:CollectItems()
         end }
     end
@@ -150,7 +198,8 @@ local function OpenContextMenu()
         end }
     end
 
-    items[#items + 1] = { text = "Mover botón (Alt + arrastrar)", isTitle = true, notCheckable = true, notClickable = true }
+    -- "Recargar UI" es la última opción accionable; el gesto de mover el botón
+    -- ya se documenta en el tooltip (Alt+arrastrar), no como ítem de menú.
     items[#items + 1] = { text = "Recargar UI", func = function()
         ReloadUI()
     end }
@@ -170,11 +219,58 @@ local function OnMouseDown(self, button)
 end
 
 local function OnEnter(self)
+    if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+        GameTooltip:Hide()
+        return
+    end
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     GameTooltip:SetText("|cfff58cbaRaidDominion|r")
-    GameTooltip:AddLine("|cff00ff00Clic:|r Abrir/cerrar el menú flotante")
-    GameTooltip:AddLine("|cff00ff00Clic derecho:|r Opciones")
-    GameTooltip:AddLine("|cff00ff00Alt + arrastrar:|r Mover el botón")
+
+    -- Bloques de SEGUIMIENTO (paridad con el tooltip del botón "Jugador" de la
+    -- barra inferior, pero SIN avisos de descubrimiento: cada bloque solo
+    -- aparece si tiene datos). Orden: objetos → monedas → instancias. El bloque
+    -- de instancias lo decide el propio módulo (check general de la sección
+    -- Instancias): TooltipLines devuelve nil cuando el check está apagado.
+    local first = true
+    local function AddBlock(title, lines, maxLines)
+        if type(lines) ~= "table" or #lines == 0 then return end
+        if not first then
+            GameTooltip:AddLine(" ", 1, 1, 1, true)
+        end
+        first = false
+        GameTooltip:AddLine(title, 1, 0.82, 0, true)
+        local shown = 0
+        for _, line in ipairs(lines) do
+            if maxLines and shown >= maxLines then
+                local hidden = #lines - shown
+                GameTooltip:AddLine("  " .. ((RD.UIUtils and RD.UIUtils.TruncHint and RD.UIUtils.TruncHint(hidden))
+                    or ("… y " .. hidden .. " más")), 0.6, 0.6, 0.6, true)
+                break
+            end
+            if type(line) == "table" then
+                GameTooltip:AddLine("  " .. tostring(line.text or ""), line.r or 1, line.g or 1, line.b or 1, true)
+            else
+                GameTooltip:AddLine("  " .. tostring(line), 0.85, 0.85, 0.9, true)
+            end
+            shown = shown + 1
+        end
+    end
+
+    local goals = RD.utils and RD.utils.itemGoals
+    if goals and goals.TrackedItemLines then
+        AddBlock("Seguimiento de objetos:", goals:TrackedItemLines(), 10)
+    end
+    if goals and goals.TrackedCurrencyLines then
+        AddBlock("Seguimiento de monedas:", goals:TrackedCurrencyLines(), 10)
+    end
+    local instances = RD.ui and RD.ui.playerEditorSectionsInstances
+    if instances and instances.TooltipLines then
+        AddBlock("Seguimiento de instancias:", instances:TooltipLines(), 12)
+    end
+
+    GameTooltip:AddLine("|cff00ff00Clic:|r Abrir/cerrar el menú flotante", 1, 1, 1, true)
+    GameTooltip:AddLine("|cff00ff00Clic derecho:|r Menú contextual", 1, 1, 1, true)
+    GameTooltip:AddLine("|cff00ff00Alt+arrastrar:|r Mover el botón", 1, 1, 1, true)
     GameTooltip:Show()
 end
 

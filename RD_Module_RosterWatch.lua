@@ -82,18 +82,21 @@ function RosterWatch:Sync()
                     abandoned = assign:ClearForPlayer(name)
                 end
                 local parts = {}
+                local total = 0
                 for _, listKey in ipairs({ "roles", "abilities", "buffs", "auras" }) do
                     local items = abandoned[listKey]
                     if items and #items > 0 then
+                        total = total + #items
                         local label = ABANDON_LABELS[listKey]
                         parts[#parts + 1] = (label and (#items == 1 and label[1] or label[2]) or listKey) .. ": " .. table.concat(items, ", ")
                     end
                 end
-                if #parts > 0 and RD.messageManager and RD.messageManager.SendSystemMessage then
-                    -- Informa QUIÉN dejó el grupo (con color de clase) + los abandonos
+                if total > 0 and RD.messageManager and RD.messageManager.SendSystemMessage then
+                    -- Informa QUIÉN dejó el grupo (con color de clase) + resumen de lo retirado
+                    local plural = total == 1 and "1 asignación retirada" or (total .. " asignaciones retiradas")
                     RD.messageManager:SendSystemMessage("|cffff0000[RaidDominion]|r "
                         .. ColorClassText(knownClasses[name], name)
-                        .. " dejó el grupo: " .. table.concat(parts, " || "))
+                        .. " dejó el grupo: " .. plural .. " (" .. table.concat(parts, " · ") .. ")")
                 end
             end
         end

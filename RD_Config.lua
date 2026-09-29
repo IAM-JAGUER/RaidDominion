@@ -75,28 +75,63 @@ function Config:Load()
     end
 end
 
--- Divide una clave por path ("ui.menu.scale") en sus nodos. Robusto y sin
--- depender de strsplit (que en 3.3.5a trata "." como patrón de Lua): el patrón
--- [^.]+ separa por puntos literales. Devuelve una lista de strings.
-local function SplitPath(key)
-    local parts = {}
-    if not key or key == "" then return parts end
+-- Caché del split de paths: claves con muchos Get/Set seguidos (p.ej.
+-- "chat.channel" en cada envío de mensaje, "ui.menu.scale" en cada render)
+-- parsearían el string con gmatch en cada llamada. Se cachea la lista de nodos
+-- por clave (acotada como CleanName: al superar el tope se vacía y se rellena
+-- con las claves en uso).
+local PATH_CACHE_MAX = 128
+local pathCache = {}
+local pathCacheCount = 0
+
+local function SplitKey(key)
+    local cached = pathCache[key]
+    if cached then return cached end
+    cached = {}
     for node in string.gmatch(key, "[^.]+") do
-        parts[#parts + 1] = node
+        cached[#cached + 1] = node
     end
-    return parts
+    pathCache[key] = cached
+    pathCacheCount = pathCacheCount + 1
+    if pathCacheCount > PATH_CACHE_MAX then
+        pathCache = {}
+        pathCacheCount = 0
+    end
+    return cached
 end
 
--- Tipo del nodo hoja en DEFAULT_CONFIG para una clave por path. Sirve para
--- normalizar el tipo del valor al leer/escribir (p.ej. booleanos 1/0 legacy).
-local function DefaultNodeType(key)
-    local path = SplitPath(key)
-    local cur = DEFAULTS
-    for _, node in ipairs(path) do
-        if type(cur) ~= "table" then return nil end
-        cur = cur[node]
+-- Recorre db y DEFAULTS en paralelo (una sola pasada por clave). Devuelve
+-- (container, last, dtype): container es la tabla que contiene la hoja, last
+-- el nombre del último nodo y dtype el type() de la hoja en DEFAULTS (nil si
+-- no existe). Con create=true crea los nodos intermedios faltantes y clobberea
+-- los no-tabla (uso de Set); sin él, un path no navegable devuelve (nil, nil).
+local function ResolveNode(key, create)
+    local container = db
+    local last = nil
+    local dcur = DEFAULTS
+    local nodes = SplitKey(key)
+    for i = 1, #nodes do
+        local node = nodes[i]
+        if type(dcur) == "table" then
+            dcur = dcur[node]
+        else
+            dcur = nil
+        end
+        if type(container) ~= "table" then
+            return nil, nil, type(dcur)
+        end
+        if last ~= nil then
+            local nextContainer = container[last]
+            if type(nextContainer) ~= "table" then
+                if not create then return nil, nil, type(dcur) end
+                container[last] = {}
+                nextContainer = container[last]
+            end
+            container = nextContainer
+        end
+        last = node
     end
-    return type(cur)
+    return container, last, type(dcur)
 end
 
 -- Obtiene un valor por path ("ui.menu.scale")
@@ -104,52 +139,78 @@ function Config:Get(key, default)
     if not db then return default end
     if not key then return db end
 
-    local path = SplitPath(key)
-    local current = db
-    for _, node in ipairs(path) do
-        if type(current) ~= "table" then return default end
-        current = current[node]
-    end
-    if current == nil then return default end
+    local container, last, dtype = ResolveNode(key)
+    if last == nil then return container or default end
+    if container == nil then return default end
+    local value = container[last]
+    if value == nil then return default end
     -- Normaliza legacy 1/0 a booleano nativo cuando el default es booleano
-    if type(current) == "number" and DefaultNodeType(key) == "boolean" then
-        return current ~= 0
+    if type(value) == "number" and dtype == "boolean" then
+        return value ~= 0
     end
-    return current
+    return value
+end
+
+-- Lote de escrituras: dentro de BeginBatch/EndBatch, Set NO publica
+-- CONFIG_CHANGED por cada clave; al cerrar el lote se publica UNA vez por clave
+-- distinta tocada (orden de primera escritura). Útil en sincronizaciones bulk
+-- (config del líder, asignaciones) donde N+ Sets dispararían N eventos y
+-- N re-renders en cadena. Fuera del lote el comportamiento es idéntico.
+local batchDepth = 0
+local batchList
+local batchSeen
+
+function Config:BeginBatch()
+    batchDepth = batchDepth + 1
+    if batchDepth == 1 then
+        batchList = {}
+        batchSeen = {}
+    end
+end
+
+function Config:EndBatch()
+    if batchDepth == 0 then return end
+    batchDepth = batchDepth - 1
+    if batchDepth > 0 then return end
+    local list, seen = batchList, batchSeen
+    batchList, batchSeen = nil, nil
+    if RD.events and RD.events.Publish then
+        for i = 1, #list do
+            RD.events:Publish("CONFIG_CHANGED", list[i])
+        end
+    end
 end
 
 -- Establece un valor por path ("ui.menu.scale")
 function Config:Set(key, value)
     if not db or not key then return end
 
-    local path = SplitPath(key)
-    local current = db
-    for i = 1, #path - 1 do
-        local node = path[i]
-        if type(current[node]) ~= "table" then
-            current[node] = {}
-        end
-        current = current[node]
-    end
-
-    local lastNode = path[#path]
+    local container, last, dtype = ResolveNode(key, true)
+    if last == nil then return end
 
     -- Normaliza el valor cuando la hoja es booleana: guarda SIEMPRE true/false
     -- (nunca 1/0 ni nil) para que el desmarque no borre la clave y MergeTable
     -- no la re-siembre con el default.
-    if DefaultNodeType(key) == "boolean" then
+    if dtype == "boolean" then
         if value == nil then value = false end
         if type(value) == "number" then value = value ~= 0 end
         value = value and true or false
     end
 
-    if current[lastNode] == value then return end
+    if container[last] == value then return end
 
-    current[lastNode] = value
+    container[last] = value
     self:Save()
 
     if RD.events and RD.events.Publish then
-        RD.events:Publish("CONFIG_CHANGED", key, value)
+        if batchDepth > 0 then
+            if not batchSeen[key] then
+                batchSeen[key] = true
+                batchList[#batchList + 1] = key
+            end
+        else
+            RD.events:Publish("CONFIG_CHANGED", key, value)
+        end
     end
 end
 

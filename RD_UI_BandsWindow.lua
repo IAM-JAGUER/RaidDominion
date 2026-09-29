@@ -48,6 +48,12 @@ local UniqueName = RD.UIUtils and RD.UIUtils.UniqueName
 -- Mensaje de sistema (helper central en RD.UIUtils.Log)
 local Log = (RD.UIUtils and RD.UIUtils.Log) or function(msg) print(msg) end
 
+-- Selector de banda (dropdown del título): el label NO debe llevar el envoltorio
+-- |H/|K de un enlace (un FontString normal lo mostraría crudo), pero sí conserva
+-- el color |c/|r del enlace (que el FontString sí parsea).
+local LinkLabel = (RD.UIUtils and RD.UIUtils.LinkLabel)
+    or function(t) return tostring(t or "") end
+
 local function Bands()
     return RD.utils and RD.utils.bands
 end
@@ -65,22 +71,26 @@ function BandsWindow:Refresh()
     local bands = Bands()
     if not bands then return end
 
+    -- Una sola lectura de la tabla de bandas (GetBands/GetBand recorren config
+    -- por separado; antes este refresh la leía dos veces por llamada).
+    local all = bands:GetBands()
+
     -- Clampear el índice si la banda seleccionada ya no existe
-    local count = #bands:GetBands()
+    local count = #all
     if count == 0 then
         self.bandIndex = 1
     elseif self.bandIndex > count then
         self.bandIndex = count
     end
 
-    local band = bands:GetBand(self.bandIndex)
+    local band = all[self.bandIndex]
     -- Dropdown de selección de banda (título de la ventana): lista todas las
     -- bandas y permite cambiar entre ellas. Se reconstruye solo si cambia la
     -- lista o la selección.
     self:RefreshBandDropdown()
     if self.bandInfo then
         if band then
-            self.bandInfo:SetText(string.format("GS mínimo: %d  ·  Horario: %s  ·  Jugadores: %d",
+            self.bandInfo:SetText(string.format("Gearscore mínimo: %d  ·  Horario: %s  ·  Jugadores: %d",
                 tonumber(band.minGS) or 0,
                 (band.schedule and band.schedule ~= "") and band.schedule or "Sin horario",
                 #(band.players or {})))
@@ -104,20 +114,21 @@ function BandsWindow:Create()
     if self.frame then return self.frame end
 
     local frame = CreateFrame("Frame", "RaidDominionBands", UIParent)
-    frame:SetFrameStrata("HIGH")
-    frame:SetToplevel(true)
-    frame:SetClampedToScreen(true)
+    -- Strata MEDIUM (paridad con los paneles de personaje de WoW): la ventana
+    -- se cubre/descubre con la UI del juego y pasa al frente al activarla.
+    if RD.UIUtils and RD.UIUtils.SetupWindow then
+        RD.UIUtils.SetupWindow(frame)
+    else
+        frame:SetFrameStrata("MEDIUM")
+        frame:SetToplevel(true)
+        frame:SetClampedToScreen(true)
+    end
     frame:SetSize(760, 500)
     frame:EnableMouse(true)
     frame:SetMovable(true)
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", function() frame:StartMoving() end)
     frame:SetScript("OnDragStop", function() frame:StopMovingOrSizing() end)
-
-    -- Clic sobre el gestor lo sube al frente (ventanas del addon)
-    if RD.UIUtils and RD.UIUtils.MakeClickToTop then
-        RD.UIUtils.MakeClickToTop(frame)
-    end
 
     frame:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -290,10 +301,19 @@ function BandsWindow:Create()
     end)
     self.pageNextBtn = nextBtn
 
-    -- Re-render automático si las bandas cambian en la configuración
+    -- Re-render automático si las bandas cambian en la configuración.
+    -- Debounceado: editar un campo de banda dispara varios CONFIG_CHANGED
+    -- encadenados (uno por tecla); antes cada uno reconstruía la tabla de filas
+    -- al instante (churn de frames). El refresh final es idéntico.
+    local bandsDebouncer = RD.UIUtils and RD.UIUtils.NewDebouncer
+        and RD.UIUtils.NewDebouncer(0.15, function()
+            if self.isShown then self:Refresh() end
+        end)
     if RD.events and RD.events.Subscribe then
         RD.events:Subscribe("CONFIG_CHANGED", function(key)
-            if key == "bands" and self.isShown then
+            if key == "bands" and self.isShown and bandsDebouncer then
+                bandsDebouncer:Fire()
+            elseif key == "bands" and self.isShown then
                 self:Refresh()
             end
         end)
@@ -343,7 +363,7 @@ function BandsWindow:RefreshBandDropdown()
 
     local options = {}
     for i, b in ipairs(list) do
-        options[#options + 1] = { key = tostring(i), label = tostring(b.name or ("Banda " .. i)) }
+        options[#options + 1] = { key = tostring(i), label = LinkLabel(b.name) or ("Banda " .. i) }
     end
 
     local widgets = RD.ui and RD.ui.widgets
@@ -399,8 +419,12 @@ function BandsWindow:ShowBand(index)
     end
 
     self:Refresh()
-    self.frame:Show()
-    self.frame:Raise()
+    if RD.UIUtils and RD.UIUtils.ActivateWindow then
+        RD.UIUtils.ActivateWindow(self.frame)
+    else
+        self.frame:Show()
+        self.frame:Raise()
+    end
     self.isShown = true
 end
 

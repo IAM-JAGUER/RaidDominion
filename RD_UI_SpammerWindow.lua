@@ -4,7 +4,9 @@
               Edita bands[i].spammer: prefijo/nombre/sufijo, duración, composición
               por rol, mensaje con placeholders, canales y vista previa (límite 255).
               El nombre se sincroniza desde band.name al abrir (ICC25H → "ICC 25H").
-              Registra RD.ui.spammerWindow.
+              Las constantes de layout/canales y el envío por canal viven en
+              RD_UI_SpammerWindowCore.lua (carga previa); el control
+              (Open/Close/Toggle) en RD_UI_SpammerWindow_Control.lua.
     API PÚBLICA:
         - RD.ui.spammerWindow:Open(bandIndex) / Close() / Toggle()
         - RD.ui.spammerWindow:SetRunning(bool) / RefreshBandDropdown()
@@ -17,75 +19,28 @@ local addonName, private = ...
 local RD = _G.RaidDominion or {}
 _G.RaidDominion = RD
 
-local SpammerWindow = {
-    frame = nil,
-    isShown = false,
-    bandIndex = nil,
-    running = false,
-    bandLabel = nil,
-    bandDropdown = nil,
-    _bandDropdownKey = nil,
-}
+local SpammerWindow = assert(RD.ui and RD.ui.spammerWindow, "RD_UI_SpammerWindowCore.lua debe cargarse antes que RD_UI_SpammerWindow.lua")
+
+-- Constantes de layout/canales expuestas por el core (RD_UI_SpammerWindowCore.lua)
+local C = SpammerWindow.constants
+local PAD, G = C.PAD, C.G
+local WIN_W, WIN_H, INNER = C.WIN_W, C.WIN_H, C.INNER
+local CHANNEL_LABELS, OUTPUT_LABELS, Y = C.CHANNEL_LABELS, C.OUTPUT_LABELS, C.Y
 
 local GOLD_R, GOLD_G, GOLD_B = unpack((RD.constants and RD.constants.COLORS and RD.constants.COLORS.GOLD) or { 1, 0.82, 0 })
 
 local UniqueName = RD.UIUtils and RD.UIUtils.UniqueName
 local Log = (RD.UIUtils and RD.UIUtils.Log) or function(msg) print(msg) end
+-- Texto "presentable" para UN FontString de 3.3.5a: un FontString normal NO
+-- renderiza el marcado de enlace |H...|h como enlace interactivo (no existe el
+-- hipervínculo activo fuera de las plantillas de chat). Se conserva el mensaje
+-- crudo (con el enlace) en self.lastPreviewRaw para enviar/copiar tal cual, y la
+-- preview muestra el texto visible con su color: con LinkLabel el FontString
+-- parsea |c/|r (color de la rareza) y solo se retira el envoltorio |H/|K
+-- (que se vería crudo). Resultado: la preview se ve como el mensaje en el chat.
+local StripMarkup = (RD.UIUtils and RD.UIUtils.StripMarkup) or function(t) return tostring(t or "") end
+local LinkLabel = (RD.UIUtils and RD.UIUtils.LinkLabel) or StripMarkup
 local CreateScrollFrame = (RD.ui and RD.ui.widgets and RD.ui.widgets.CreateScrollFrame) or nil
--- Grid de layout (GUTTER 8, padding 12; offsets enteros §6 AGENTS)
-local PAD = 12
-local G = 8
-local WIN_W = 600
-local WIN_H = 492
-local INNER = WIN_W - PAD * 2 -- 576
-
-local CHANNEL_LABELS = {
-    { key = "RAID", label = "Banda" },
-    { key = "RAID_WARNING", label = "Aviso" },
-    { key = "GUILD", label = "Hermandad" },
-    { key = "YELL", label = "Gritar" },
-    { key = "SAY", label = "Decir" },
-    { key = "PARTY", label = "Grupo" },
-    { key = "INN", label = "Posada" },
-    { key = "SYSTEM", label = "Sistema" },
-    { key = "1", label = "1" },
-    { key = "2", label = "2" },
-    { key = "3", label = "3" },
-    { key = "4", label = "4" },
-    { key = "5", label = "5" },
-    { key = "6", label = "6" },
-    { key = "7", label = "7" },
-    { key = "8", label = "8" },
-    { key = "9", label = "9" },
-}
-
--- Canales de salida puntual
-local OUTPUT_LABELS = {
-    { key = "RAID", label = "Banda" },
-    { key = "RAID_WARNING", label = "Aviso" },
-    { key = "GUILD", label = "Hermandad" },
-    { key = "YELL", label = "Gritar" },
-    { key = "SAY", label = "Decir" },
-    { key = "PARTY", label = "Grupo" },
-    { key = "INN", label = "Posada" },
-    { key = "SYSTEM", label = "Sistema" },
-}
-
--- Filas Y (desde el borde superior): nombre → composición → mensaje → pestañas → preview.
-local Y = {
-    title = -10,
-    nameLbl = -36,
-    nameBox = -52,
-    compLbl = -84,
-    role1 = -104,
-    role2 = -132,
-    msgLbl = -160,
-    msg = -178,
-    tabs = -221,
-    tabContent = -251,
-    prevLbl = -369,
-    prev = -387,
-}
 
 local function GetCurrent()
     local bands = RD.utils and RD.utils.bands
@@ -96,6 +51,11 @@ end
 local function Commit(key, value)
     local bands = RD.utils and RD.utils.bands
     if not bands or not SpammerWindow.bandIndex then return end
+    -- Flush del borrador antes de escribir: un write a bands[i].spammer dispara
+    -- CONFIG_CHANGED -> SyncToBands -> RefreshFields, que re-pinta los campos
+    -- desde la config; si el texto en vivo no está commiteado, se pierde al
+    -- togglear un check de canal o un ojo de rol. Mismo patrón que CommitSeparator.
+    if SpammerWindow._commitTexts then SpammerWindow:_commitTexts() end
     local partial = {}
     partial[key] = value
     bands:UpdateSpammer(SpammerWindow.bandIndex, partial)
@@ -142,7 +102,11 @@ function SpammerWindow:RebuildPreview()
             msg = spammer:BuildMessage(self.bandIndex)
         end
     end
-    self.previewBox:SetText(msg or "")
+    self.lastPreviewRaw = msg or ""
+    -- La preview muestra el texto VISIBLE con su color (los receptores ven el
+    -- nombre del enlace en el chat, coloreado: "[Espina de Saronita]" en morado
+    -- si es un ítem, etc.), no el marcado crudo |H...|h.
+    self.previewBox:SetText(LinkLabel(self.lastPreviewRaw))
     -- Redimensiona el hijo del scroll al alto real del texto.
     if self.previewChild then
         local h = (self.previewBox.GetStringHeight and self.previewBox:GetStringHeight() + 8) or 24
@@ -178,9 +142,15 @@ function SpammerWindow:RefreshFields()
     if self.meleeClassBox then self.meleeClassBox:SetText(s.meleeClass or "") end
     if self.rangedBox then self.rangedBox:SetText(tostring(s.ranged or 0)) end
     if self.rangedClassBox then self.rangedClassBox:SetText(s.rangedClass or "") end
+    -- Estado de los ojos de clase (incluir/omitir el texto de clases por rol)
+    if self.roleEyes then
+        for _, eye in ipairs(self.roleEyes) do
+            if eye.SetShow then eye:SetShow(s[eye.showKey] ~= false) end
+        end
+    end
     if self.messageBox then self.messageBox:SetText(s.message or "") end
     if self.separatorDropdown and self.separatorDropdown.SetValue then
-        self.separatorDropdown:SetValue(s.separator or "//")
+        self.separatorDropdown:SetValue(s.separator or "")
     end
     if self.ResizeMessageBox then self:ResizeMessageBox() end
     local channels = s.channels or {}
@@ -192,16 +162,6 @@ function SpammerWindow:RefreshFields()
         end
     end
     if self.RebuildPreview then self:RebuildPreview() end
-end
-
-local function CollectChannels()
-    local out = {}
-    for i, c in ipairs(CHANNEL_LABELS) do
-        local check = SpammerWindow.channelChecks and SpammerWindow.channelChecks[i]
-        local checked = check and check:GetChecked()
-        out[c.key] = (checked == true or checked == 1)
-    end
-    return out
 end
 
 local function MakeEditBox(parent, x, y, w)
@@ -233,7 +193,7 @@ function SpammerWindow:BuildChannelControls(frame)
     self.channelTabButtons = {}
 
     local function CommitChannels()
-        Commit("channels", CollectChannels())
+        Commit("channels", self:CollectChannels())
     end
 
     -- Pestañas compactas: "Canales" (bucle) y "Salida" (puntual por canal).
@@ -282,21 +242,6 @@ function SpammerWindow:BuildChannelControls(frame)
     end
 
     self:SetChannelTab(self.channelTab or "loop")
-end
-
-function SpammerWindow:SendToChannel(channelKey)
-    if not channelKey or not self.bandIndex then return end
-    if self._commitTexts then self:_commitTexts() end
-    local spammer = RD.modules and RD.modules.spammer
-    local msg = (spammer and spammer.BuildMessage and spammer:BuildMessage(self.bandIndex)) or ""
-    if msg == "" then
-        Log("|cffff0000[RaidDominion]|r El mensaje está vacío.")
-        return
-    end
-    local mm = RD.modules and RD.modules.messageManager
-    if mm and mm.SendRaw then
-        pcall(function() mm:SendRaw(msg, channelKey) end)
-    end
 end
 
 function SpammerWindow:BuildMessageField(frame)
@@ -349,9 +294,15 @@ function SpammerWindow:Create()
     if self.frame then return self.frame end
 
     local frame = CreateFrame("Frame", "RaidDominionSpammer", UIParent)
-    frame:SetFrameStrata("HIGH")
-    frame:SetToplevel(true)
-    frame:SetClampedToScreen(true)
+    -- Strata MEDIUM (paridad con los paneles de personaje de WoW): la ventana
+    -- se cubre/descubre con la UI del juego y pasa al frente al activarla.
+    if RD.UIUtils and RD.UIUtils.SetupWindow then
+        RD.UIUtils.SetupWindow(frame)
+    else
+        frame:SetFrameStrata("MEDIUM")
+        frame:SetToplevel(true)
+        frame:SetClampedToScreen(true)
+    end
     frame:SetSize(WIN_W, WIN_H)
     frame:EnableMouse(true)
     frame:SetMovable(true)
@@ -369,8 +320,6 @@ function SpammerWindow:Create()
             })
         end
     end)
-
-    if RD.UIUtils and RD.UIUtils.MakeClickToTop then RD.UIUtils.MakeClickToTop(frame) end
 
     frame:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -418,6 +367,9 @@ function SpammerWindow:Create()
     MakeLabel(frame, "Dur.(s)", xDur, Y.nameLbl)
     self.durationBox = MakeEditBox(frame, xDur, Y.nameBox, durW)
     self.durationBox:SetNumeric(true)
+    if RD.UIUtils and RD.UIUtils.DisableLinkInsertion then
+        RD.UIUtils.DisableLinkInsertion(self.durationBox)
+    end
 
     local sepDefs = (RD.constants and RD.constants.SPAMMER_SEPARATORS) or {}
     local sepOpts = {}
@@ -427,7 +379,7 @@ function SpammerWindow:Create()
     self.separatorDropdown = RD.ui.widgets.CreateOptionsDropdown
         and RD.ui.widgets:CreateOptionsDropdown(frame, sepW, {
             emptyLabel = "Sin separador",
-            current = "//",
+            current = "",
             options = sepOpts,
             onSelect = function(key) self:CommitSeparator(key) end,
         })
@@ -436,27 +388,69 @@ function SpammerWindow:Create()
         self.separatorDropdown.button:SetHeight(24)
     end
 
-    -- Composición 2×2: labels anclados al centro del conteo (input h=24)
+    -- Composición 2×2: labels anclados al centro del conteo (input h=24).
+    -- El ancho de los campos de CLASES se reduce lo justo para reservar al final
+    -- de cada fila el botón-ojo (incluir/omitir el texto de clases).
     MakeLabel(frame, "Composición", PAD, Y.compLbl)
     local half = math.floor((INNER - G) / 2)
     local roleLabelW = 48
+    local EYE_W = 22
     local roleClassX = roleLabelW + NUM_W + G
-    local roleClassW = half - roleClassX
+    local roleClassW = half - roleClassX - EYE_W - G
     local roleDefs = {
-        { y = Y.role1, role = "Tank",   countKey = "tank",   classKey = "tankClass", x = PAD },
-        { y = Y.role2, role = "Healer", countKey = "healer", classKey = "healerClass", x = PAD },
-        { y = Y.role1, role = "Melee",  countKey = "melee",  classKey = "meleeClass", x = PAD + half + G },
-        { y = Y.role2, role = "Rango",  countKey = "ranged", classKey = "rangedClass", x = PAD + half + G },
+        { y = Y.role1, role = "Tank",   countKey = "tank",   classKey = "tankClass",   showKey = "tankClassShow",   x = PAD },
+        { y = Y.role2, role = "Healer", countKey = "healer", classKey = "healerClass", showKey = "healerClassShow", x = PAD },
+        { y = Y.role1, role = "Melee",  countKey = "melee",  classKey = "meleeClass",  showKey = "meleeClassShow",  x = PAD + half + G },
+        { y = Y.role2, role = "Rango",  countKey = "ranged", classKey = "rangedClass", showKey = "rangedClassShow", x = PAD + half + G },
     }
+    self.roleEyes = {}
     for _, rc in ipairs(roleDefs) do
         local countBox = MakeEditBox(frame, rc.x + roleLabelW, rc.y, NUM_W)
         countBox:SetNumeric(true)
+        if RD.UIUtils and RD.UIUtils.DisableLinkInsertion then
+            RD.UIUtils.DisableLinkInsertion(countBox)
+        end
         local classBox = MakeEditBox(frame, rc.x + roleClassX, rc.y, roleClassW)
         local lbl = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         lbl:SetText(rc.role)
         lbl:SetTextColor(0.8, 0.8, 0.8)
         -- Alineación vertical con el EditBox (TOPLEFT del label no coincide con el centro del input)
         lbl:SetPoint("RIGHT", countBox, "LEFT", -4, 0)
+
+        -- Botón-ojo: incluye o NO el texto de CLASES de este rol en el mensaje
+        -- (el número y el rol siempre van). Estado: bands[i].spammer.<showKey>.
+        local eye = CreateFrame("Button", UniqueName("SpEye"), frame)
+        eye:SetSize(EYE_W, EYE_W)
+        eye:SetPoint("LEFT", classBox, "RIGHT", G, 0)
+        eye.showKey = rc.showKey -- clave de config que alterna este ojo
+        local eyeTex = eye:CreateTexture(nil, "ARTWORK")
+        eyeTex:SetAllPoints()
+        eyeTex:SetTexture("Interface\\Icons\\INV_Misc_Eye_01")
+        eye:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+        local on = true
+        eye.SetShow = function(self, show)
+            on = (show ~= false)
+            eyeTex:SetVertexColor(on and 1 or 0.35, on and 1 or 0.35, on and 1 or 0.35)
+        end
+        eye:SetScript("OnEnter", function(self)
+            if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+                GameTooltip:Hide()
+                return
+            end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(on and "Incluir el texto de clases en el mensaje"
+                or "Omitir el texto de clases del mensaje", 1, 0.82, 0, 1, true)
+            GameTooltip:AddLine("El número y el rol siempre se incluyen.", 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        eye:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        eye:SetScript("OnClick", function(self)
+            local cur = GetCurrent()
+            local show = not (cur and cur[self.showKey] ~= false)
+            Commit(self.showKey, show)
+        end)
+        self.roleEyes[#self.roleEyes + 1] = eye
+
         if rc.countKey == "tank" then self.tankBox = countBox; self.tankClassBox = classBox
         elseif rc.countKey == "healer" then self.healerBox = countBox; self.healerClassBox = classBox
         elseif rc.countKey == "melee" then self.meleeBox = countBox; self.meleeClassBox = classBox
@@ -517,7 +511,9 @@ function SpammerWindow:Create()
     local copyEdit
     self.copyBtn:SetScript("OnClick", function()
         if self._commitTexts then self:_commitTexts() end
-        local msg = self.previewBox and self.previewBox:GetText() or ""
+        -- Copia el mensaje CRUDO (con el enlace dinámico intacto), no el texto
+        -- presentable de la preview (que ya no incluye el marcado).
+        local msg = self.lastPreviewRaw or (self.previewBox and self.previewBox:GetText() or "")
         if msg == "" then
             Log("|cffff0000[RaidDominion]|r La preview está vacía: no hay nada que copiar.")
             return
@@ -602,7 +598,7 @@ function SpammerWindow:Create()
         if self.rangedBox then partial.ranged = tonumber(self.rangedBox:GetText()) or 0 end
         if self.rangedClassBox then partial.rangedClass = self.rangedClassBox:GetText() end
         if self.messageBox then partial.message = self.messageBox:GetText() end
-        partial.channels = CollectChannels()
+        partial.channels = self:CollectChannels()
         bands:UpdateSpammer(self.bandIndex, partial)
         if self.RebuildPreview then self:RebuildPreview() end
     end
@@ -639,19 +635,43 @@ function SpammerWindow:Create()
     if RD.UIUtils and RD.UIUtils.EnableTabNavigation then RD.UIUtils.EnableTabNavigation(boxes) end
 
     if RD.events and RD.events.Subscribe then
+        -- Sincronización de banda en vivo, DEBOUNCEADA (editar un campo de banda
+        -- dispara un Set por tecla -> CONFIG_CHANGED; antes cada uno ejecutaba
+        -- AutoComposition + RefreshFields + RefreshBandDropdown al instante).
+        -- La guardia _inBandSync se conserva: los cambios internos (p.ej. dentro
+        -- de RefreshFields) pueden re-publicar CONFIG_CHANGED("bands"); mientras
+        -- se está sincronizando se descartan, evitando el bucle de re-render.
+        local SyncToBands = function()
+            if not self.isShown then return end
+            if self._inBandSync then return end
+            self._inBandSync = true
+            local ok, err = pcall(function()
+                -- Renombre de banda en vivo: re-sincroniza nombre/cupo/dificultad
+                if self.bandIndex and self.AutoComposition then self:AutoComposition(self.bandIndex) end
+                self:RefreshFields()
+                local bands = RD.utils and RD.utils.bands
+                if self.bandIndex and bands and not bands:GetBand(self.bandIndex) then
+                    local spammer = RD.modules and RD.modules.spammer
+                    if spammer and spammer.Stop then spammer:Stop() end
+                    self:Close()
+                elseif self.bandIndex and bands and bands:GetBand(self.bandIndex) then
+                    -- Renombre de banda: refresca el selector del título
+                    self:RefreshBandDropdown()
+                end
+            end)
+            self._inBandSync = false
+            if not ok then
+                Log("|cffff0000[RaidDominion]|r Error en la sync de banda del spammer: " .. tostring(err))
+            end
+        end
+        local bandSyncDebouncer = RD.UIUtils and RD.UIUtils.NewDebouncer
+            and RD.UIUtils.NewDebouncer(0.15, SyncToBands)
         RD.events:Subscribe("CONFIG_CHANGED", function(key)
             if key ~= "bands" or not self.frame or not self.isShown then return end
-            -- Renombre de banda en vivo: re-sincroniza nombre/cupo/dificultad
-            if self.bandIndex and self.AutoComposition then self:AutoComposition(self.bandIndex) end
-            self:RefreshFields()
-            local bands = RD.utils and RD.utils.bands
-            if self.bandIndex and bands and not bands:GetBand(self.bandIndex) then
-                local spammer = RD.modules and RD.modules.spammer
-                if spammer and spammer.Stop then spammer:Stop() end
-                self:Close()
-            elseif self.bandIndex and bands and bands:GetBand(self.bandIndex) then
-                -- Renombre de banda: refresca el selector del título
-                self:RefreshBandDropdown()
+            if bandSyncDebouncer then
+                bandSyncDebouncer:Fire()
+            else
+                SyncToBands()
             end
         end)
     end

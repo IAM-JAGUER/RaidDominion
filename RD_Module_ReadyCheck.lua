@@ -2,7 +2,7 @@
     RD_Module_ReadyCheck.lua
     PROPÓSITO: Ready check con cuenta regresiva: el líder indica los segundos
               (como el pull), se lanza DoReadyCheck y el conteo va por CHAT
-              (título "=== ... ===" + ticks 9s..., 5s... ¡RESPONDAN AHORA!,
+              (título "= ... =" + ticks 9s..., 5s... ¡RESPONDAN AHORA!,
               ceñidos al contador). Al terminar (temporizador o
               READY_CHECK_FINISHED), se anuncia quién respondió, quién rechazó,
               quién no respondió y quién está AFK/desconectado.
@@ -97,7 +97,7 @@ local function Classify(active)
 end
 
 -- Anuncia el resumen por el canal configurado. El título va envuelto en
--- "=== ... ===" (como reglas/mecánicas) y las líneas de detalle van sueltas.
+-- "= ... =" (como reglas/mecánicas) y las líneas de detalle van sueltas.
 local function SendSummary(active)
     local mm = RD.modules and RD.modules.messageManager
     if not mm then return end
@@ -105,7 +105,7 @@ local function SendSummary(active)
     local total = #active.units
     local responded = #yes + #no
     local parts = {
-        string.format("=== Finalizado: %d/%d respondieron ===", responded, total),
+        string.format("= Finalizado: %d/%d respondieron =", responded, total),
     }
     local function AddLine(label, list)
         if #list > 0 then
@@ -120,7 +120,10 @@ local function SendSummary(active)
     mm:SendSequence(parts, 0.1, mm:GetChannel())
 end
 
--- Inicia el check con una cuenta regresiva de `seconds` segundos (solo líder).
+-- Inicia el check. `seconds` > 0 lanza el check con cuenta regresiva de chat
+-- y resumen programado; `seconds` == 0 lo lanza INMEDIATO (comportamiento
+-- nativo del juego): solo DoReadyCheck, sin ticks ni resumen programado — el
+-- cierre y el resumen se delegan a READY_CHECK_FINISHED/CANCELED del juego.
 function ReadyCheck:Start(seconds)
     if not InRaid() and not InParty() then
         Log("|cffff0000[RaidDominion]|r Debes estar en grupo para hacer un check.")
@@ -130,9 +133,12 @@ function ReadyCheck:Start(seconds)
         Log("|cffff0000[RaidDominion]|r Solo el líder puede iniciar un check.")
         return
     end
-    local n = tonumber(seconds) or 30
-    if n < 5 then n = 5 end
-    if n > 60 then n = 60 end
+    local immediate = (tonumber(seconds) == 0)
+    local n = immediate and 0 or (tonumber(seconds) or 30)
+    if not immediate then
+        if n < 5 then n = 5 end
+        if n > 60 then n = 60 end
+    end
 
     if self.active then self:Cancel() end
     DoReadyCheck()
@@ -148,30 +154,34 @@ function ReadyCheck:Start(seconds)
         -- Primer anuncio en t=0 (restaurado) + conteo ceñido al contador:
         -- 9s..., 5s... → ¡RESPONDAN AHORA!, 3s..., 2s..., 1s... El "¡RESPONDAN
         -- AHORA!" va justo tras el tick de 5s cuando existe; si no, cierra el
-        -- conteo en t=N. Al final queda solo el resumen.
-        mm:SendMessage(string.format("=== Ready check lanzado por %s (%ds) ===", (playerName ~= "" and strupper(playerName)) or "?", n))
+        -- conteo en t=N. Al final queda solo el resumen. En el modo inmediato
+        -- (0s, nativo) no hay ticks: el juego cierra con sus propios eventos.
+        mm:SendMessage(string.format((immediate and "= Ready check lanzado por %s (inmediato) =") or "= Ready check lanzado por %s (%ds) =",
+            (playerName ~= "" and strupper(playerName)) or "?", n))
         local plan = {}
         local function At(second, text)
             plan[#plan + 1] = { second = second, text = text }
         end
-        local hasFive = (n - 1) >= 5
-        -- Con n=6 el primer tick es "5s..." y caería en el mismo segundo que el
-        -- "5s... ¡RESPONDAN AHORA!" combinado (n-5=1): se omite el suelto.
-        if n > 1 and not (hasFive and n - 5 == 1) then
-            At(1, tostring(n - 1) .. "s...")
-        end
-        if hasFive then
-            -- "¡RESPONDAN AHORA!" ACOMPAÑA al tick de 5s (mismo segundo); el 4s
-            -- queda libre (sin tick propio).
-            At(n - 5, "5s... ¡RESPONDAN AHORA!")
-        end
-        for _, s in ipairs({ 3, 2, 1 }) do
-            if s < n - 1 then
-                At(n - s, tostring(s) .. "s...")
+        if not immediate then
+            local hasFive = (n - 1) >= 5
+            -- Con n=6 el primer tick es "5s..." y caería en el mismo segundo que el
+            -- "5s... ¡RESPONDAN AHORA!" combinado (n-5=1): se omite el suelto.
+            if n > 1 and not (hasFive and n - 5 == 1) then
+                At(1, tostring(n - 1) .. "s...")
             end
-        end
-        if not hasFive then
-            At(n, "¡RESPONDAN AHORA!")
+            if hasFive then
+                -- "¡RESPONDAN AHORA!" ACOMPAÑA al tick de 5s (mismo segundo); el 4s
+                -- queda libre (sin tick propio).
+                At(n - 5, "5s... ¡RESPONDAN AHORA!")
+            end
+            for _, s in ipairs({ 3, 2, 1 }) do
+                if s < n - 1 then
+                    At(n - s, tostring(s) .. "s...")
+                end
+            end
+            if not hasFive then
+                At(n, "¡RESPONDAN AHORA!")
+            end
         end
         -- Los ticks y el fin se programan capturando la tabla `active` CONCRETA:
         -- si el check se cancela, termina antes o se inicia otro, `ReadyCheck.active`
@@ -184,13 +194,16 @@ function ReadyCheck:Start(seconds)
                 end
             end)
         end
-        -- Fin del check (resumen) justo después del último tick, si el
-        -- temporizador no se cierra antes con READY_CHECK_FINISHED.
-        mm:Schedule(n + 0.15, function()
-            if ReadyCheck.active == active then
-                self:Finish()
-            end
-        end)
+        -- Fin del check (resumen) justo después del último tick. En el modo
+        -- inmediato (0s) NO se programa: el juego cierra con READY_CHECK_FINISHED
+        -- (y el resumen lo envía ese manejador)
+        if not immediate then
+            mm:Schedule(n + 0.15, function()
+                if ReadyCheck.active == active then
+                    self:Finish()
+                end
+            end)
+        end
     end
 end
 
@@ -207,7 +220,7 @@ function ReadyCheck:Cancel()
     if not self.active then return end
     self.active = nil
     if RD.messageManager then
-        RD.messageManager:SendMessage("=== Check cancelado ===")
+        RD.messageManager:SendMessage("= Check cancelado =")
     end
 end
 
@@ -224,7 +237,8 @@ f:SetScript("OnEvent", function(self, event, arg1)
         -- FINISHED), los status se resetean y sin esto un "No" caería en
         -- "Respondieron". Si no hay status (nunca disponible), se cuenta como
         -- respondió ("yes").
-        local name = arg1 and UnitName(arg1) or nil
+        local name
+        if arg1 then name = UnitName(arg1) end
         if name then
             local status = GetReadyCheckStatus and GetReadyCheckStatus(arg1) or nil
             ReadyCheck.active.confirmed[name] = (status == "notready") and "no" or "yes"

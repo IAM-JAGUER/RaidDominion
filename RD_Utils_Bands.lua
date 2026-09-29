@@ -7,6 +7,8 @@
         - RD.utils.bands:CreateBand(data) / UpdateBand(index, data) / DeleteBand(index)
         - RD.utils.bands:AddPlayer(index, player) / RemovePlayer(index, name)
         - RD.utils.bands:UpdatePlayer(index, oldName, data)
+        - RD.utils.bands:GetMemberships(name[, classFile]) -> bandas donde el jugador figura
+        - RD.utils.bands:RenamePlayerEverywhere(oldName, newName) -> { renamed, conflicts }
         - RD.utils.bands:SetSanction(index, name, cause)
         - RD.utils.bands:AdjustAttendance(index, name, delta) -> nuevos puntos
         - RD.utils.bands:SetRole(index, name, role)
@@ -99,6 +101,7 @@ function Bands:AddPlayer(index, playerData)
     if not band then return false end
     EnsureBandLists(band)
     local clean = CleanName(playerData.name)
+    if clean == "" then return false end
     for _, m in ipairs(band.players) do
         if CleanName(m.name) == clean then
             if playerData.class then m.class = playerData.class end
@@ -135,6 +138,7 @@ function Bands:RemovePlayer(index, name)
     local band = self:GetBand(index)
     if not band then return false end
     local clean = CleanName(name)
+    if clean == "" then return false end
     for i, m in ipairs(band.players or {}) do
         if CleanName(m.name) == clean then
             table.remove(band.players, i)
@@ -152,6 +156,7 @@ function Bands:SetSanction(index, name, cause)
     local band = self:GetBand(index)
     if not band then return false end
     local clean = CleanName(name)
+    if clean == "" then return false end
     for _, m in ipairs(band.players or {}) do
         if CleanName(m.name) == clean then
             cause = cause or ""
@@ -186,6 +191,7 @@ function Bands:GetPlayer(index, name)
     local band = self:GetBand(index)
     if not band then return nil end
     local clean = CleanName(name)
+    if clean == "" then return nil end
     for _, m in ipairs(band.players or {}) do
         if CleanName(m.name) == clean then
             return m
@@ -194,11 +200,46 @@ function Bands:GetPlayer(index, name)
     return nil
 end
 
+-- Bandas donde figura el jugador (nombre normalizado, insensible a mayúsculas y
+-- reino). Devuelve { { index = i, name = band.name, player = m, band = band }, ... }
+-- SOLO de las bandas cuyo jugador está realmente en ellas; con nombre vacío, {}.
+-- `classFile` (opcional) es la clase en vivo del personaje que se está editando:
+-- si el miembro de la banda tiene clase y NO coincide, es OTRO personaje con el
+-- mismo nombre (colisión de nombres) y NO se cuenta como pertenencia real. Si el
+-- miembro no tiene clase o no se pasa classFile, se acepta por nombre (no se
+-- puede descartar).
+function Bands:GetMemberships(name, classFile)
+    local out = {}
+    local clean = CleanName(name)
+    if clean == "" then return out end
+    local wantClass = (type(classFile) == "string") and string.lower(classFile) or ""
+    for i, band in ipairs(self:GetBands() or {}) do
+        if type(band.players) == "table" then
+            for _, m in ipairs(band.players) do
+                if m and m.name and CleanName(m.name) == clean then
+                    local mClass = string.lower(tostring(m.class or ""))
+                    if wantClass == "" or mClass == "" or mClass == wantClass then
+                        out[#out + 1] = {
+                            index = i,
+                            name = band.name or ("Banda " .. i),
+                            player = m,
+                            band = band,
+                        }
+                    end
+                    break
+                end
+            end
+        end
+    end
+    return out
+end
+
 -- Asigna el rol de un jugador (claves: tank / healer / rango / melee)
 function Bands:SetRole(index, name, role)
     local band = self:GetBand(index)
     if not band then return false end
     local clean = CleanName(name)
+    if clean == "" then return false end
     for _, m in ipairs(band.players or {}) do
         if CleanName(m.name) == clean then
             m.role = role or ""
@@ -213,6 +254,7 @@ function Bands:SetDual(index, name, dual)
     local band = self:GetBand(index)
     if not band then return false end
     local clean = CleanName(name)
+    if clean == "" then return false end
     for _, m in ipairs(band.players or {}) do
         if CleanName(m.name) == clean then
             m.dual = dual or ""
@@ -228,6 +270,7 @@ function Bands:SetLeader(index, name, leader)
     local band = self:GetBand(index)
     if not band then return false end
     local clean = CleanName(name)
+    if clean == "" then return false end
     for _, m in ipairs(band.players or {}) do
         if CleanName(m.name) == clean then
             m.leader = leader or ""
@@ -246,6 +289,7 @@ function Bands:UpdatePlayer(index, oldName, data)
     if not band then return false end
     EnsureBandLists(band)
     local oldClean = CleanName(oldName)
+    if oldClean == "" then return false end
     for _, m in ipairs(band.players) do
         if CleanName(m.name) == oldClean then
             local newName = (data.name ~= nil and data.name ~= "") and data.name or m.name
@@ -265,13 +309,56 @@ function Bands:UpdatePlayer(index, oldName, data)
                 m.banned = m.sanction ~= ""
             end
             if data.banned ~= nil then m.banned = data.banned and true or false end
-            if data.notes ~= nil then m.notes = data.notes end
+            if data.leader ~= nil then m.leader = data.leader end
+            if data.notes ~= nil and data.notes ~= "" then m.notes = data.notes end
+            -- Nota: las notas nunca viajan por "Obtener" (privacidad, AGENTS.md
+            -- §14.3), así que un `data.notes` vacío conserva la nota local.
             if data.points ~= nil then m.points = tonumber(data.points) or 0 end
             SaveBands(self:GetBands())
             return true
         end
     end
     return false
+end
+
+-- Renombra a un jugador en TODAS las bandas donde figura (UpdatePlayer solo actúa
+-- en una banda). Devuelve { renamed = n, conflicts = { {index=, name=}, ... } }.
+-- Si en alguna banda el nombre nuevo ya pertenece a otro jugador, esa banda se
+-- deja intacta y se registra en `conflicts` (nunca se pisan datos). No escribe
+-- nada si el nombre no cambia de verdad (CleanName) o es vacío; guarda una sola
+-- vez al final.
+function Bands:RenamePlayerEverywhere(oldName, newName)
+    local res = { renamed = 0, conflicts = {} }
+    local oldClean = CleanName(oldName)
+    local newClean = CleanName(newName)
+    if oldClean == "" or newClean == "" or oldClean == newClean then return res end
+    local bands = self:GetBands() or {}
+    local changed = false
+    for i, band in ipairs(bands) do
+        if type(band.players) == "table" then
+            for _, m in ipairs(band.players) do
+                if m and m.name and CleanName(m.name) == oldClean then
+                    local taken = false
+                    for _, other in ipairs(band.players) do
+                        if other ~= m and other.name and CleanName(other.name) == newClean then
+                            taken = true
+                            break
+                        end
+                    end
+                    if taken then
+                        res.conflicts[#res.conflicts + 1] = { index = i, name = band.name or ("Banda " .. i) }
+                    else
+                        m.name = newName
+                        res.renamed = res.renamed + 1
+                        changed = true
+                    end
+                    break
+                end
+            end
+        end
+    end
+    if changed then SaveBands(bands) end
+    return res
 end
 
 -- Escanea los miembros del grupo/banda actual y los añade a la banda
@@ -328,6 +415,16 @@ function Bands:GetSpammer(index)
         out[k] = n or 0
     end
     if out.duration < 1 then out.duration = 60 end
+    -- Separador válido SOLO si es una de las opciones actuales (un símbolo o "").
+    -- Valores legacy ("//", ", ") se normalizan a "sin separador" para que el
+    -- dropdown y la composición nunca divergan.
+    if out.separator ~= nil then
+        local allowed = {}
+        for _, o in ipairs((RD.constants and RD.constants.SPAMMER_SEPARATORS) or {}) do
+            allowed[o.key] = true
+        end
+        if not allowed[out.separator] then out.separator = "" end
+    end
     return out
 end
 

@@ -55,9 +55,15 @@ function Win:Create()
     if self.frame then return self.frame end
 
     local frame = CreateFrame("Frame", "RaidDominionLoot", UIParent)
-    frame:SetFrameStrata("HIGH")
-    frame:SetToplevel(true)
-    frame:SetClampedToScreen(true)
+    -- Strata MEDIUM (paridad con los paneles de personaje de WoW): la ventana
+    -- se cubre/descubre con la UI del juego y pasa al frente al activarla.
+    if RD.UIUtils and RD.UIUtils.SetupWindow then
+        RD.UIUtils.SetupWindow(frame)
+    else
+        frame:SetFrameStrata("MEDIUM")
+        frame:SetToplevel(true)
+        frame:SetClampedToScreen(true)
+    end
     frame:SetSize(WIN_W, WIN_H)
     -- Posición inicial centrada en la pantalla (los modales del addon se anclan
     -- a UIParent; sin SetPoint el frame podría quedar en una posición no visible).
@@ -67,9 +73,6 @@ function Win:Create()
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", function() frame:StartMoving() end)
     frame:SetScript("OnDragStop", function() frame:StopMovingOrSizing() end)
-    if RD.UIUtils and RD.UIUtils.MakeClickToTop then
-        RD.UIUtils.MakeClickToTop(frame)
-    end
     frame:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -169,7 +172,7 @@ function Win:Create()
     end)
     if RD.UIUtils and RD.UIUtils.AddButtonTooltip then
         RD.UIUtils.AddButtonTooltip(itemBtn, function()
-            return "Arrastra un ítem de la bolsa aquí, o haz clic con un ítem en el cursor para tomarlo. Clic con el cursor vacío lo suelta al cursor."
+            return "Arrastra un ítem de la bolsa aquí, o haz clic con uno en el cursor para tomarlo.\nClic con el cursor vacío: lo sueltas al cursor."
         end)
     end
     self.itemNameText = mainView:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -235,6 +238,9 @@ function Win:Create()
     self.timeEdit:SetAutoFocus(false)
     self.timeEdit:SetNumeric(true)
     self.timeEdit:SetMaxLetters(2)
+    if RD.UIUtils and RD.UIUtils.DisableLinkInsertion then
+        RD.UIUtils.DisableLinkInsertion(self.timeEdit)
+    end
     -- Enter/Escape liberan el foco (estilo KRT): commitean el límite y sueltan
     -- el foco para poder usar los atajos del teclado. El Escape cierra la
     -- ventana en un segundo toque vía UISpecialFrames (ya en RaidDominionLoot).
@@ -413,13 +419,13 @@ end
 
 -- Lee el campo de límite de tiempo (si tiene un valor válido) y lo guarda en la
 -- config compartida loot.rollTimeLimit para que StartRoll lo use. El límite no
--- puede superar 10 segundos (máx. permitido por el gestor de botín).
+-- puede superar 60 segundos (máx. permitido por el gestor de botín).
 function Win:ApplyTimeLimit()
     if not self.timeEdit then return end
     local raw = self.timeEdit:GetText() or ""
     local value = tonumber(raw)
     if value and value >= 1 then
-        if value > 10 then value = 10 end
+        if value > 60 then value = 60 end
         if RD.config and RD.config.Set then
             RD.config:Set("loot.rollTimeLimit", math.floor(value))
         end
@@ -506,14 +512,14 @@ function Win:Refresh()
     end
 
     -- Sincroniza el campo de límite de tiempo con la config (sin pisar el texto
-    -- mientras el usuario lo está editando). El límite no supera 10 segundos.
+    -- mientras el usuario lo está editando). El límite no supera 60 segundos.
     if self.timeEdit and not self.timeEdit:HasFocus() then
-        local limit = 10
+        local limit = 20
         if RD.config and RD.config.Get then
-            limit = RD.config:Get("loot.rollTimeLimit", 10)
+            limit = RD.config:Get("loot.rollTimeLimit", 20)
         end
-        limit = tonumber(limit) or 10
-        if limit > 10 then limit = 10 end
+        limit = tonumber(limit) or 20
+        if limit > 60 then limit = 60 end
         self.timeEdit:SetText(tostring(limit))
     end
 
@@ -623,8 +629,12 @@ function Win:Open()
     end
     if not self.frame then return end
     self:SetView(self.view or "loot")
-    self.frame:Show()
-    self.frame:Raise()
+    if RD.UIUtils and RD.UIUtils.ActivateWindow then
+        RD.UIUtils.ActivateWindow(self.frame)
+    else
+        self.frame:Show()
+        self.frame:Raise()
+    end
     self.isShown = true
     if self.updateFrame then self.updateFrame:Show() end
     -- Activa el loop del countdown del módulo

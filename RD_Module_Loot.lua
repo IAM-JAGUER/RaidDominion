@@ -20,90 +20,35 @@
         - RD.modules.loot:GetState()  -- para la UI
     EVENTOS: Publica LOOT_ITEM_ADDED, LOOT_ROLL_ADDED, LOOT_ROLL_CLEARED,
              LOOT_WINNER_SET, LOOT_STATE_CHANGED (para refrescar la UI).
+    DEPENDENCIA: el núcleo lógico (estado, historial, parseo de dados) vive en
+                 RD_Module_LootCore.lua (RD.modules.lootCore), que debe cargarse
+                 antes que este archivo (orden en RaidDominion.toc).
 ]]
 
 local addonName, private = ...
 local RD = _G.RaidDominion or {}
 _G.RaidDominion = RD
 
+local LootCore = assert(RD.modules.lootCore, "RD_Module_LootCore.lua debe cargarse antes que RD_Module_Loot.lua")
+
 local Loot = {}
 
--- Tipos de roll (main / dual / enchant)
-local ROLL_MAIN = 1
-local ROLL_DUAL = 2
-local ROLL_ENCHANT = 3
+-- Estado compartido con el núcleo (RD_Module_LootCore.lua)
+local state = LootCore.state
 
--- Duración por defecto de la ventana de dados (segundos)
-local DEFAULT_COUNTDOWN = 10
+-- Constantes del núcleo (duración/límite de la ventana de dados)
+local DEFAULT_COUNTDOWN = LootCore.DEFAULT_COUNTDOWN
+local MAX_COUNTDOWN = LootCore.MAX_COUNTDOWN
 
--- Límite máximo permitido de la ventana de dados (segundos)
-local MAX_COUNTDOWN = 10
-
--- Estado interno
-local state = {
-    itemName = "",
-    itemLink = nil,
-    itemTexture = nil,
-    itemCount = 1,
-    itemRarity = 0,
-    rollType = ROLL_MAIN,
-    rolls = {},          -- { { name = "X", roll = 87 }, ... }
-    rolled = false,      -- si el jugador local ya tiró
-    canRoll = true,      -- si se aceptan más dados
-    recording = false,   -- si se están registrando dados
-    countdown = 0,       -- tiempo restante (0 = sin countdown activo)
-    countdownActive = false,
-    token = 0,           -- contador anti-stale para avisos programados del conteo
-    winner = nil,
-    winnerRoll = nil,    -- dado final del ganador (incluye tiros de desempate)
-    history = {},        -- registro persistente de ítems asignados
-    announced = false,
-    -- Estado del desempate por empate en el dado más alto
-    duel = false,        -- si hay una ronda de desempate activa
-    duelPlayers = {},    -- nombres de los jugadores que deben desempatar
-    duelRolls = {},      -- tiros de la ronda de desempate { { name, roll } }
-}
-
--- Patrón de dados localizado: convierte RANDOM_ROLL_RESULT (formato printf del
--- cliente, p.ej. "%s rolls %d (%d-%d)" o la variante esMX) a un patrón Lua.
--- Replica la conversión de LibDeformat que usa KRT pero sin librerías externas:
--- escapa los caracteres mágicos y sustituye %s → (.-) y %d → (%d+). Sin esto,
--- el parseo hardcodeado en inglés fallaba en clientes no enUS (esMX) y no se
--- registraban los dados.
-local rollPattern
-local function GetRollPattern()
-    if rollPattern then return rollPattern end
-    local fmt = _G.RANDOM_ROLL_RESULT or "%s rolls %d (%d-%d)"
-    local p = fmt:gsub("([%(%)%.%+%-%[%]%?%^%$%%%*])", "%%%1")
-    p = p:gsub("%%%%s", "(.-)"):gsub("%%%%d", "(%%d+)")
-    rollPattern = "^" .. p .. "$"
-    return rollPattern
-end
-
--- Resuelve el nombre del jugador del mensaje de dado: quita el hipervínculo de
--- jugador (si el cliente lo incluye) y mapea el pronombre de primera persona
--- del propio jugador ("You"/"Tú" según el cliente) al nombre real, para no
--- registrar un dado bajo el pronombre.
-local function ResolveRollName(player)
-    if not player then return nil end
-    local me = UnitName("player") or ""
-    if player == me then return me end
-    player = player:gsub("|Hplayer:[^|]+|h([^|]+)|h", "%1")
-    if player == me then return me end
-    local selfRefs = {
-        ["You"] = true, ["you"] = true,
-        ["Tú"] = true, ["tú"] = true, ["Tu"] = true, ["tu"] = true,
-        ["Du"] = true, ["du"] = true, ["Vous"] = true, ["vous"] = true,
-    }
-    if selfRefs[player] then return me end
-    return player
-end
-
-local Publish = function(event, ...)
-    if RD.events and RD.events.Publish then
-        RD.events:Publish(event, ...)
-    end
-end
+-- Helpers del núcleo reutilizados aquí. Solo se aliasan los que LootCore
+-- exporta como FUNCIÓN PLANA (definidas con `.`, sin `self`): Publish y
+-- SortRolls. Los métodos con dos puntos (GetRollPattern, ResolveRollName,
+-- RollTypeLabel, InvalidateCountdown, HasTie, DidRoll, GetItemRarity) se
+-- invocan SIEMPRE como `LootCore:Metodo(...)` — aliasarlos como función simple
+-- hacía que el argumento real entrara como `self` y el parámetro llegara nil
+-- (p.ej. ResolveRollName devolvía nil y ningún dado se registraba).
+local Publish = LootCore.Publish
+local SortRolls = LootCore.SortRolls
 
 local function System(msg)
     if RD.messageManager and RD.messageManager.SendSystemMessage then
@@ -119,18 +64,6 @@ local function AnnounceDefault(msg)
     if mm and mm.SendMessage then
         mm:SendMessage(tostring(msg or ""), mm:GetChannel())
     end
-end
-
--- Etiqueta de tipo de dados para anuncios ("MainSpec", "DualSpec", "Enchant")
-local ROLL_TYPE_LABEL = { [1] = "MainSpec", [2] = "DualSpec", [3] = "Enchant" }
-local function RollTypeLabel(rollType)
-    return ROLL_TYPE_LABEL[rollType] or "MainSpec"
-end
-
--- Invalida los avisos programados del conteo en curso (cualquier reinicio de
--- dados, cierre o declaración cancela los ticks pendientes de la cuenta vieja).
-local function InvalidateCountdown()
-    state.token = state.token + 1
 end
 
 -- Plan de avisos del conteo de dados por la salida por defecto, con el mismo
@@ -183,70 +116,45 @@ function Loot:IsMasterLooter()
     return (partyID and partyID == 0)
 end
 
--- ¿Hay empate en el dado más alto de la ronda principal? Si lo hay no se
--- auto-declara ganador: queda pendiente un desempate o una elección manual.
-local function HasTie()
-    if #state.rolls < 2 then return false end
-    return state.rolls[1].roll == state.rolls[2].roll
-end
-
-local function SortRolls()
-    if #state.rolls > 0 then
-        table.sort(state.rolls, function(a, b)
-            if a.roll == b.roll then
-                return a.name < b.name
-            end
-            return a.roll > b.roll
-        end)
-        if not HasTie() then
-            state.winner = state.rolls[1].name
-        end
-    end
-end
+-- ==================== API delegada al núcleo ====================
+-- La lógica de empates, historial y agrupación vive en RD_Module_LootCore.lua;
+-- estos wrappers preservan la API pública de RD.modules.loot.
 
 -- ¿Hay empate en el dado más alto de la ronda principal?
 function Loot:HasTie()
-    return HasTie()
+    return LootCore:HasTie()
 end
 
 -- Nombres de los jugadores que comparten el dado más alto (los que deben
 -- desempatar). Vacío si no hay empate.
 function Loot:GetTiedPlayers()
-    local tied = {}
-    if #state.rolls < 2 then return tied end
-    local top = state.rolls[1].roll
-    for _, r in ipairs(state.rolls) do
-        if r.roll == top then
-            tied[#tied + 1] = r.name
-        end
-    end
-    return tied
+    return LootCore:GetTiedPlayers()
 end
 
-local function DidRoll(name)
-    for _, r in ipairs(state.rolls) do
-        if r.name == name then
-            return true
-        end
-    end
-    return false
+-- Registra un ítem en el historial de la banda (lo obtiene un jugador)
+function Loot:LogItem(playerName, itemLink, rollType, rollValue)
+    return LootCore:LogItem(playerName, itemLink, rollType, rollValue)
 end
 
--- Parse de un itemLink para extraer el itemID
-local function GetItemID(itemLink)
-    local _, _, itemID = itemLink:find("|Hitem:(%d+):")
-    return tonumber(itemID)
+-- Registra un dado lanzado en el historial de la banda (por día)
+function Loot:LogRoll(playerName, roll)
+    return LootCore:LogRoll(playerName, roll)
 end
 
--- Parse del rarity desde el color del itemLink (|cffffffff → 1, |cff0070dd → 4, ...)
-local function GetItemRarity(itemLink)
-    local r = itemLink:match("|cff(%x%x%x%x%x%x)")
-    if not r then return 0 end
-    local map = {
-        ["9d9d9d"] = 0, ["ffffff"] = 1, ["1eff00"] = 2, ["0070dd"] = 3,
-        ["a335ee"] = 4, ["ff8000"] = 5, ["e6cc80"] = 6,
-    }
-    return map[r:lower()] or 0
+-- Devuelve el historial de botín de la banda
+function Loot:GetHistory()
+    return LootCore:GetHistory()
+end
+
+-- Devuelve el historial agrupado por día (tabla { [dia] = { registros } }).
+-- Los días se ordenan de más reciente a más antiguo.
+function Loot:GetDailyHistory()
+    return LootCore:GetDailyHistory()
+end
+
+-- Agrupa una lista de registros (p.ej. los de un día) POR ÍTEM
+function Loot:GroupByItem(records)
+    return LootCore:GroupByItem(records)
 end
 
 -- ==================== Gestión de ítem ====================
@@ -260,7 +168,7 @@ function Loot:SetItem(itemLink, count)
     state.itemLink = itemLink
     state.itemTexture = itemTexture
     state.itemCount = tonumber(count) or 1
-    state.itemRarity = GetItemRarity(itemLink)
+    state.itemRarity = LootCore:GetItemRarity(itemLink)
     -- Nuevo ítem: reinicia los dados
     self:ClearRolls()
     Publish("LOOT_ITEM_ADDED", state)
@@ -278,101 +186,10 @@ function Loot:GetItem()
     return state
 end
 
--- ==================== Registro de botín de la banda ====================
-
--- Clave de día local (YYYY-MM-DD) para agrupar el historial por jornada.
-local function TodayKey()
-    return date("%Y-%m-%d")
-end
-
--- Registra un ítem en el historial de la banda (lo obtiene un jugador)
-function Loot:LogItem(playerName, itemLink, rollType, rollValue)
-    table.insert(state.history, {
-        day = TodayKey(),
-        event = "item",
-        player = playerName,
-        itemLink = itemLink,
-        rollType = rollType,
-        rollValue = rollValue,
-        time = GetTime(),
-    })
-    Publish("LOOT_HISTORY_ADDED", state)
-end
-
--- Registra un dado lanzado en el historial de la banda (por día). Se llama desde
--- CHAT_MSG_SYSTEM cuando se captura un dado del jugador local o de la banda.
-function Loot:LogRoll(playerName, roll)
-    if not playerName or not roll then return end
-    table.insert(state.history, {
-        day = TodayKey(),
-        event = "roll",
-        player = playerName,
-        roll = tonumber(roll),
-        itemLink = state.itemLink,
-        time = GetTime(),
-    })
-    Publish("LOOT_HISTORY_ADDED", state)
-end
-
--- Devuelve el historial de botín de la banda
-function Loot:GetHistory()
-    return state.history
-end
-
--- Devuelve el historial agrupado por día (tabla { [dia] = { registros } }).
--- Los días se ordenan de más reciente a más antiguo.
-function Loot:GetDailyHistory()
-    local groups = {}
-    local order = {}
-    for _, e in ipairs(state.history) do
-        local day = e.day or TodayKey()
-        if not groups[day] then
-            groups[day] = {}
-            order[#order + 1] = day
-        end
-        groups[day][#groups[day] + 1] = e
-    end
-    -- Días de más reciente a más antiguo (el formato YYYY-MM-DD ordena como string)
-    table.sort(order, function(a, b) return a > b end)
-    return groups, order
-end
-
--- Agrupa una lista de registros (p.ej. los de un día) POR ÍTEM: cada ítem
--- agrupa sus dados (rolls) y al ganador (la entrega del ítem). Devuelve una
--- lista de { itemLink, rolls = { {player, roll}, ... }, winner, winnerRoll,
--- rollType }. Los registros comparten itemLink (los dados se registran con el
--- ítem actual y la entrega con el ítem ganado), lo que permite juntarlos.
-function Loot:GroupByItem(records)
-    local items = {}
-    local order = {}
-    for _, e in ipairs(records or {}) do
-        local link = e.itemLink or ""
-        if link ~= "" then
-            if not items[link] then
-                items[link] = { itemLink = link, rolls = {}, winner = nil, winnerRoll = nil, rollType = nil }
-                order[#order + 1] = link
-            end
-            local it = items[link]
-            if e.event == "roll" then
-                it.rolls[#it.rolls + 1] = { player = e.player, roll = e.roll }
-            elseif e.event == "item" then
-                it.winner = e.player
-                it.winnerRoll = e.rollValue
-                it.rollType = e.rollType
-            end
-        end
-    end
-    local result = {}
-    for _, link in ipairs(order) do
-        result[#result + 1] = items[link]
-    end
-    return result
-end
-
 -- ==================== Dados (rolls) ====================
 
 -- Inicia una ventana de dados para el ítem actual con un tipo dado. Anuncia el
--- modo por la salida por defecto (estilo KRT: "Dados MainSpec por: <ítem>") y
+-- modo por la salida por defecto (estilo KRT: "Dados Main por: <ítem>") y
 -- programa los avisos del conteo con el mismo ritmo que el conteo de pull.
 function Loot:StartRoll(rollType)
     if not state.itemLink then return false end
@@ -386,11 +203,11 @@ function Loot:StartRoll(rollType)
         limit = RD.config:Get("loot.rollTimeLimit", DEFAULT_COUNTDOWN)
     end
     limit = tonumber(limit) or DEFAULT_COUNTDOWN
-    -- El límite no puede superar MAX_COUNTDOWN (10 s): saneo de configs
+    -- El límite no puede superar MAX_COUNTDOWN (60 s): saneo de configs
     -- heredadas que guardaron valores mayores (la pestaña de config ya no
     -- permite ese campo; el gestor de botín lo controla al escribir).
     if limit > MAX_COUNTDOWN then limit = MAX_COUNTDOWN end
-    InvalidateCountdown()
+    LootCore:InvalidateCountdown()
     state.countdown = limit
     state.countdownActive = true
     -- Asegura que el loop del countdown corra: el frame se auto-oculta al
@@ -398,7 +215,7 @@ function Loot:StartRoll(rollType)
     -- sin esto el countdown quedaba congelado y los dados nunca se cerraban.
     self:ShowLoop()
     -- Anuncio del modo por la salida por defecto (KRT: ChatRollMS/OS/Free).
-    local modeMsg = string.format("Dados %s por: %s", RollTypeLabel(rollType), state.itemLink)
+    local modeMsg = string.format("Dados %s por: %s", LootCore:RollTypeLabel(rollType), state.itemLink)
     if state.itemCount and state.itemCount > 1 then
         modeMsg = modeMsg .. string.format(" x%d", state.itemCount)
     end
@@ -430,12 +247,12 @@ end
 -- CHAT_MSG_SYSTEM: captura los dados (RANDOM_ROLL_RESULT localizado)
 function Loot:CHAT_MSG_SYSTEM(msg)
     if not msg or not state.recording then return end
-    local player, roll, min, max = msg:match(GetRollPattern())
+    local player, roll, min, max = msg:match(LootCore:GetRollPattern())
     if player and roll and tonumber(min) == 1 and tonumber(max) == 100 then
         if state.canRoll == false then
             return
         end
-        player = ResolveRollName(player)
+        player = LootCore:ResolveRollName(player)
         if not player then return end
         -- Ronda de desempate: solo se aceptan tiros de los jugadores en duelo,
         -- y cada uno tira una sola vez. Al completar todos los tiros se resuelve.
@@ -449,15 +266,15 @@ function Loot:CHAT_MSG_SYSTEM(msg)
                 if d.name == player then return end
             end
             table.insert(state.duelRolls, { name = player, roll = tonumber(roll) })
-            self:LogRoll(player, tonumber(roll))
+            LootCore:LogRoll(player, tonumber(roll))
             Publish("LOOT_ROLL_ADDED", state)
             self:ResolveDuel()
             return
         end
-        if not DidRoll(player) then
+        if not LootCore:DidRoll(player) then
             table.insert(state.rolls, { name = player, roll = tonumber(roll) })
             SortRolls()
-            self:LogRoll(player, tonumber(roll))
+            LootCore:LogRoll(player, tonumber(roll))
             Publish("LOOT_ROLL_ADDED", state)
         end
     end
@@ -503,20 +320,23 @@ end
 -- más alto. Solo esos jugadores pueden tirar durante el desempate (el filtro
 -- vive en CHAT_MSG_SYSTEM). Devuelve false si no hay empate que desempatar.
 function Loot:StartDuel()
-    if not HasTie() then return false end
-    state.duelPlayers = self:GetTiedPlayers()
+    if not LootCore:HasTie() then return false end
+    state.duelPlayers = LootCore:GetTiedPlayers()
     state.duelRolls = {}
     state.duel = true
     state.recording = true
     state.canRoll = true
     state.rolled = false
+    -- Sin ganador hasta que el desempate se resuelva (o se elija a mano).
+    state.winner = nil
+    state.winnerRoll = nil
     local limit = DEFAULT_COUNTDOWN
     if RD.config and RD.config.Get then
         limit = RD.config:Get("loot.rollTimeLimit", DEFAULT_COUNTDOWN)
     end
     limit = tonumber(limit) or DEFAULT_COUNTDOWN
     if limit > MAX_COUNTDOWN then limit = MAX_COUNTDOWN end
-    InvalidateCountdown()
+    LootCore:InvalidateCountdown()
     state.countdown = limit
     state.countdownActive = true
     self:ShowLoop()
@@ -589,11 +409,11 @@ function Loot:AnnounceWinner()
     local rollValue = self:HighestRoll()
     AnnounceDefault(string.format("%s ganó %s (dado %d, %s)", state.winner, state.itemLink, rollValue, rollTypeText))
     -- Lleva registro del ítem ganador en el historial (esté o no haya bandas).
-    self:LogItem(state.winner, state.itemLink, state.rollType, rollValue)
+    LootCore:LogItem(state.winner, state.itemLink, state.rollType, rollValue)
     state.announced = true
     state.recording = false
     state.countdownActive = false
-    InvalidateCountdown()
+    LootCore:InvalidateCountdown()
     Publish("LOOT_STATE_CHANGED", state)
     return true
 end
@@ -622,13 +442,16 @@ function Loot:GetBossLootLinks()
 end
 
 -- Spamea el botín del boss caído por la salida por defecto, como el addon base
--- (KRT): cabecera "Items obtenidos:" + un mensaje por ítem numerado. Si no hay
--- ventana de botín abierta, cae al ítem actual del gestor.
+-- (KRT): cabecera "Ítems obtenidos:" + un mensaje por ítem numerado. Si no hay
+-- ventana de botín abierta, cae al ítem actual del gestor. TOPE de ítems
+-- anunciados (MAX_LOOT_LINES) para no soltar una ráfaga enorme: el resto se
+-- resume con "… y N más"; el pacing del limitador global espacia el resto.
 function Loot:SpamLoot()
+    local MAX_LOOT_LINES = 30
     local list = self:GetBossLootLinks()
     if #list == 0 then
         if not state.itemLink then return false end
-        AnnounceDefault("Items obtenidos:")
+        AnnounceDefault("Ítems obtenidos:")
         if state.itemCount > 1 then
             AnnounceDefault("1. " .. state.itemLink .. " x" .. state.itemCount)
         else
@@ -636,21 +459,35 @@ function Loot:SpamLoot()
         end
         return true
     end
-    AnnounceDefault("Items obtenidos:")
+    AnnounceDefault("Ítems obtenidos:")
     for i, link in ipairs(list) do
+        if i > MAX_LOOT_LINES then
+            AnnounceDefault(string.format("… y %d más", #list - MAX_LOOT_LINES))
+            break
+        end
         AnnounceDefault(string.format("%d. %s", i, link))
     end
     return true
 end
 
--- Índice del candidato del maestro despojador para un slot de botín (el índice
--- de jugador que acepta GiveMasterLoot en 3.3.5a).
+-- Índice del candidato del maestro despojador para recoger un slot de botín
+-- (el índice de jugador que acepta GiveMasterLoot en 3.3.5a). GetMasterLootCandidate
+-- NO tiene un orden estable entre invocaciones, así que se busca el índice por
+-- NOMBRE en el momento (patrón de los addons de master loot correctos).
 function Loot:MasterCandidateIndex(lootSlot)
     local myName = UnitName("player") or ""
     if myName == "" then return nil end
+    local core = RD.modules and RD.modules.autoLootCore
+    if core and core.IndexOfRecipient then
+        return core:IndexOfRecipient(myName)
+    end
+    -- Respaldo: sondeo directo por nombre
+    local cleanMy = core and core.CleanName and core:CleanName(myName) or myName
     for p = 1, 40 do
-        local name = GetMasterLootCandidate(lootSlot, p)
-        if name == myName then return p end
+        local name = GetMasterLootCandidate(p)
+        if not name then break end
+        local cleanName = core and core.CleanName and core:CleanName(name) or name
+        if cleanName == cleanMy then return p end
     end
     return nil
 end
@@ -660,12 +497,12 @@ end
 -- GiveMasterLoot, como hace KRT al asignar a un ganador.
 function Loot:CollectItems()
     if not self:IsMasterLooter() then
-        System("|cffff0000[RaidDominion]|r Solo el maestro despojador puede recoger los items.")
+        System("|cffff0000[RaidDominion]|r Solo el maestro despojador puede recoger los ítems.")
         return false
     end
     local n = GetNumLootItems()
     if not n or n <= 0 then
-        System("|cffffd700[RaidDominion]|r No hay ventana de botín abierta para recoger items.")
+        System("|cffffd700[RaidDominion]|r No hay ventana de botín abierta para recoger ítems.")
         return false
     end
     local collected = 0
@@ -682,7 +519,7 @@ function Loot:CollectItems()
         end
     end
     if collected > 0 then
-        AnnounceDefault(string.format("%s recogió %d items del botín.", UnitName("player") or "El maestro", collected))
+        AnnounceDefault(string.format("%s recogió %d ítems del botín.", UnitName("player") or "El maestro", collected))
         return true
     end
     return false
@@ -692,7 +529,7 @@ end
 
 -- Limpia los dados y el estado del roll actual (mantiene el historial)
 function Loot:ClearRolls()
-    InvalidateCountdown()
+    LootCore:InvalidateCountdown()
     state.rolls = {}
     state.rolled = false
     state.canRoll = true
@@ -786,7 +623,7 @@ function Loot:Tick(elapsed)
         state.countdownActive = false
         state.recording = false
         state.canRoll = false
-        InvalidateCountdown()
+        LootCore:InvalidateCountdown()
         -- Fin del conteo por la salida por defecto (estilo conteo de pull) y
         -- aviso local de que los dados fuera de tiempo se ignoran.
         AnnounceDefault("¡Dados cerrados! Fuera de tiempo se ignoran.")

@@ -6,6 +6,13 @@
     API PÚBLICA:
         - RD.ui.menuFactory:BuildMenu(definitions, opts)
         - RD.ui.menuFactory:RenderBar(buttonBar, barItems)
+        - RD.ui.menuFactory:OrderBySavedOrder(items, savedOrder, getId)
+        - RD.ui.menuFactory:MoveOrderedId(order, source, target)
+        - RD.ui.menuFactory:OrderBarItems(barItems)
+        - RD.ui.menuFactory:DefaultMenuOrder()
+        - RD.ui.menuFactory:MenuOrder()
+        - RD.ui.menuFactory:OrderMainDefs(defs)
+        - RD.ui.menuFactory:ApplyBarButtonActive(button, activeEvent)
     EVENTOS: Ninguno (los botones disparan acciones vía RD.MenuActions)
 ]]
 
@@ -14,6 +21,132 @@ local RD = _G.RaidDominion or {}
 _G.RaidDominion = RD
 
 local MenuFactory = {}
+
+-- ============================================================================
+-- ORDEN DE ÍTEMS (barra inferior y menú principal)
+-- Los iconos de la barra inferior y los ítems del menú flotante se pueden
+-- reordenar arrastrando el grip correspondiente en la ventana de configuración
+-- (claves ui.actionBar.order y ui.menu.itemOrder). Vacío = orden de declaración.
+-- Helpers PUROS (los blinda el harness): no leen config ni crean frames.
+-- ============================================================================
+
+-- Devuelve una COPIA de `items` ordenada según `savedOrder` (array de ids con
+-- la semántica del arrastre del drag-row: 1..n). Los ítems sin id guardado se
+-- dejan al final en su orden de declaración (estable, sin table.sort).
+function MenuFactory:OrderBySavedOrder(items, savedOrder, getId)
+    items = items or {}
+    if type(getId) ~= "function" then return items end
+    local order = {}
+    if type(savedOrder) == "table" then
+        for _, v in ipairs(savedOrder) do order[#order + 1] = v end
+    end
+    local byId = {}
+    for _, it in ipairs(items) do
+        local id = getId(it)
+        if id ~= nil then byId[id] = it end
+    end
+    local result = {}
+    local used = {}
+    for _, id in ipairs(order) do
+        local it = byId[id]
+        if it then
+            result[#result + 1] = it
+            used[it] = true
+        end
+    end
+    for _, it in ipairs(items) do
+        if not used[it] then
+            result[#result + 1] = it
+            used[it] = true
+        end
+    end
+    return result
+end
+
+-- Mueve el id en `order[source]` a la posición `target` (semántica del drag:
+-- target en [1, n+1], el hueco donde se insertaría ANTES de quitar el ítem).
+-- Devuelve un array NUEVO; no muta `order`.
+function MenuFactory:MoveOrderedId(order, source, target)
+    local list = {}
+    for i = 1, #order do list[i] = order[i] end
+    local n = #list
+    if n == 0 then return list end
+    local id = list[source]
+    if id == nil then return list end
+    table.remove(list, source)
+    local insert = target
+    if target > source then insert = target - 1 end
+    insert = math.max(1, math.min(#list + 1, insert))
+    table.insert(list, insert, id)
+    return list
+end
+
+-- Orden guardado de la barra inferior (por `action`) o nil si no hay config.
+local function SavedOrder(key)
+    if RD.config and RD.config.Get then
+        local v = RD.config:Get(key)
+        if type(v) == "table" then return v end
+    end
+    return nil
+end
+
+-- Ítems de la barra inferior en el orden guardado (para construir/reposicionar).
+function MenuFactory:OrderBarItems(barItems)
+    return self:OrderBySavedOrder(barItems, SavedOrder("ui.actionBar.order"),
+        function(it) return it.action end)
+end
+
+-- Orden POR DEFECTO de los ítems del menú flotante con pestaña propia: el orden
+-- del ESQUEMA de configuración ordenado por `order` (la fila superior), filtrado
+-- a los ids que existen en MainFrameOptions. Así la barra superior y el menú
+-- comparten el mismo orden inicial (bands, abilities, roles, buffs, auras,
+-- mechanics, rules).
+function MenuFactory:DefaultMenuOrder()
+    local defs = RD.constants and RD.constants.MENU_DEFINITIONS and RD.constants.MENU_DEFINITIONS.MainFrameOptions
+    local schema = RD.constants and RD.constants.CONFIG_SCHEMA
+    if not defs or not schema then return {} end
+    -- Copia ordenada por `order` (la fila superior respeta este orden; no se
+    -- reusa la declaración del archivo, que no coincide).
+    local sorted = {}
+    for _, tab in ipairs(schema) do sorted[#sorted + 1] = tab end
+    for i = 2, #sorted do
+        local key = sorted[i]
+        local keyOrder = key.order or 0
+        local j = i - 1
+        while j >= 1 and (sorted[j].order or 0) > keyOrder do
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        end
+        sorted[j + 1] = key
+    end
+    local ids = {}
+    for _, tab in ipairs(sorted) do
+        if tab.id then
+            for _, d in ipairs(defs) do
+                if d.id == tab.id then
+                    ids[#ids + 1] = d.id
+                    break
+                end
+            end
+        end
+    end
+    return ids
+end
+
+-- Orden EFECTIVO de los ítems reordenables del menú principal: el guardado
+-- (ui.menu.itemOrder) si el usuario ya reordenó, o el orden por defecto.
+function MenuFactory:MenuOrder()
+    local saved = SavedOrder("ui.menu.itemOrder")
+    if type(saved) == "table" and #saved > 0 then return saved end
+    return self:DefaultMenuOrder()
+end
+
+-- Defs del menú principal en el orden efectivo (MenuOrder); el submenú del
+-- addon (sin contraparte) queda al final en orden de declaración.
+function MenuFactory:OrderMainDefs(defs)
+    return self:OrderBySavedOrder(defs, self:MenuOrder(),
+        function(it) return it.id end)
+end
 
 -- Constantes de grid (deben coincidir con RD.constants.GRID)
 local GRID = (RD.constants and RD.constants.GRID) or {}
@@ -144,18 +277,24 @@ function MenuFactory:BuildMenu(definitions, opts)
             end
             button.bg = bg
 
-            -- Botón-icono a la derecha (asignar/desasignar). Solo clic izquierdo:
-            -- el clic derecho del menú es para "volver", no para asignar.
+            -- Botón-icono a la derecha (asignar/desasignar). Clic izquierdo =
+            -- asignar/desasignar; clic derecho = anunciar el elemento con la
+            -- palabra configurada (assignWord). El icono captura el derecho para
+            -- que NO caiga en el "volver al menú anterior" del botón matriz.
             local iconBtn = CreateFrame("Button", nil, button)
             iconBtn:SetSize(18, 18)
             iconBtn:SetPoint("RIGHT", button, "RIGHT", -4, 0)
-            iconBtn:RegisterForClicks("LeftButtonUp")
+            iconBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             local iconTex = iconBtn:CreateTexture(nil, "ARTWORK")
             iconTex:SetAllPoints()
             iconTex:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
             iconBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
             iconBtn:SetScript("OnClick", function(self, btn)
-                if opts.onIconClick then
+                if btn == "RightButton" then
+                    if opts.onIconRightClick then
+                        opts.onIconRightClick(item, self)
+                    end
+                elseif opts.onIconClick then
                     opts.onIconClick(item, self, btn)
                 end
             end)
@@ -171,14 +310,19 @@ function MenuFactory:BuildMenu(definitions, opts)
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
                 if item.isBand then
                     GameTooltip:SetText("Banda", 1, 1, 1, 1, true)
-                    GameTooltip:AddLine("Clic: Abrir el gestor de jugadores de la banda", 1, 0.82, 0, true)
+                    GameTooltip:AddLine("Clic: abrir el gestor de jugadores de la banda", 1, 0.82, 0, true)
+                    GameTooltip:AddLine("Clic der.: anunciar la banda", 1, 0.82, 0, true)
                 else
                     GameTooltip:SetText("Asignación rápida", 1, 1, 1, 1, true)
-                    if item.assigned then
-                        GameTooltip:AddLine("Clic: Desasignar", 1, 0.82, 0, true)
-                    else
-                        GameTooltip:AddLine("Clic: Asignar al objetivo seleccionado", 1, 0.82, 0, true)
-                    end
+                    GameTooltip:AddLine("Clic: asignar o desasignar el objetivo seleccionado", 1, 0.82, 0, true)
+                    -- Las palabras de anuncio del clic (texto / clic derecho) son las
+                    -- configuradas en la pestaña de cada lista (announce.<lista>):
+                    -- `word` (clic en el texto) y `assignWord` (clic derecho en el icono).
+                    local clickWord = tostring(item.clickWord or "NEED"):gsub("^%s+", ""):gsub("%s+$", "")
+                    if clickWord == "" then clickWord = "NEED" end
+                    local clickRightWord = tostring(item.clickRightWord or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                    GameTooltip:AddLine("Clic en el texto: " .. clickWord, 1, 0.82, 0, true)
+                    GameTooltip:AddLine("Clic der.: " .. (clickRightWord ~= "" and clickRightWord or "anunciar el elemento"), 1, 0.82, 0, true)
                 end
                 GameTooltip:Show()
             end)
@@ -344,7 +488,17 @@ end
       completa (sin template que lo tape).
     - Highlight "UI-Panel-Button-Highlight" (brillo dorado) en ADD al pasar.
     - Posicionados con (i-1)*(BUTTON_SIZE+BUTTON_PADDING) y offset y = -1.
-    Cada barItem: { icon, action, actionRight, tooltip }.
+    Cada barItem: { icon, action, actionRight, tooltip, enabled, activeEvent,
+    tooltipExtra }.
+    - `enabled` (función o booleano) controla la visibilidad del botón: los
+      deshabilitados se ocultan y el resto se reposiciona sin huecos (UpdateBar).
+    - `activeEvent` (nombre de evento del bus RD) resalta el botón mientras el
+      evento se publica con `true` (p.ej. AUTO_LOOT_STATE_CHANGED del modo Auto).
+    - `tooltipExtra` ({ title, lines, empty } o lista de secciones) añade líneas
+      dinámicas al tooltip, tras las pistas de clic: `lines()` se evalúa en cada
+      hover y devuelve una lista de strings (p.ej. el seguimiento de monedas y
+      objetos del botón "Jugador"). `empty` se muestra en gris si la sección no
+      tiene líneas (descubrimiento).
 ]]
 function MenuFactory:RenderBar(buttonBar, barItems, opts)
     if not buttonBar or not barItems then return end
@@ -355,7 +509,15 @@ function MenuFactory:RenderBar(buttonBar, barItems, opts)
     local padding = AB.BUTTON_PADDING or 2
     local btnSize = math.max(1, buttonSize - 3)
 
-    for i, barItem in ipairs(barItems) do
+    buttonBar.rdButtons = {}
+    buttonBar.rdSize = buttonSize
+    buttonBar.rdPad = padding
+
+    -- Los botones se crean en el ORDEN GUARDADO (ui.actionBar.order): el índice
+    -- de la entrada coincide con la posición visual y UpdateBar reordena en vivo
+    -- (mismo orden guardado) sin recrear botones.
+    local orderedItems = self:OrderBarItems(barItems)
+    for i, barItem in ipairs(orderedItems) do
         -- Botón plano: el icono es el fondo, sin plantilla que lo oculte
         local button = CreateFrame("Button", nil, buttonBar)
         button:SetSize(btnSize, btnSize)
@@ -396,12 +558,123 @@ function MenuFactory:RenderBar(buttonBar, barItems, opts)
                     GameTooltip:AddLine(line, 1, 0.82, 0, true)
                 end
             end
+            -- Contenido EXTRA declarativo (p.ej. el seguimiento del botón
+            -- "Jugador"): barItem.tooltipExtra puede ser UNA sección
+            -- { title, lines, empty } o una LISTA de secciones. Cada `lines()`
+            -- se evalúa en cada hover (datos frescos, sin suscripciones ni
+            -- OnUpdate). Las líneas se indentan 2 espacios bajo su cabecera
+            -- dorada; entre secciones va una línea en blanco. Si una sección
+            -- sale vacía y declara `empty`, se muestra el aviso en gris
+            -- (descubrimiento) en vez de omitir el bloque por completo.
+            local extra = barItem.tooltipExtra
+            if type(extra) == "table" then
+                local sections = (type(extra.lines) == "function") and { extra } or extra
+                local first = true
+                for _, section in ipairs(sections) do
+                    if type(section) == "table" and type(section.lines) == "function" then
+                        local ok, extras = pcall(section.lines)
+                        if ok and type(extras) == "table" then
+                            local has = #extras > 0
+                            if has or (section.empty and section.empty ~= "") then
+                                if not first then
+                                    GameTooltip:AddLine(" ", 1, 1, 1, true)
+                                end
+                                first = false
+                                if section.title and section.title ~= "" then
+                                    GameTooltip:AddLine(section.title, 1, 0.82, 0, true)
+                                end
+                                if has then
+                                    for _, line in ipairs(extras) do
+                                        GameTooltip:AddLine("  " .. tostring(line), 0.85, 0.85, 0.9, true)
+                                    end
+                                else
+                                    GameTooltip:AddLine("  " .. tostring(section.empty), 0.6, 0.6, 0.6, true)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
             GameTooltip:Show()
         end)
         button:SetScript("OnLeave", function()
             GameTooltip:Hide()
         end)
+
+        local entry = { button = button, item = barItem }
+        buttonBar.rdButtons[#buttonBar.rdButtons + 1] = entry
+
+        -- Resaltado de "activo" mientras el evento publica `true`
+        if barItem.activeEvent then
+            self:ApplyBarButtonActive(button, barItem.activeEvent)
+        end
     end
+
+    self:UpdateBar(buttonBar)
+end
+
+-- Resaltado de "activo" de un botón de barra: se ilumina mientras el evento del
+-- bus se publica con `true` (p.ej. la sesión Auto en curso). Compartido por la
+-- barra del menú flotante y la barra de la ventana de configuración.
+function MenuFactory:ApplyBarButtonActive(button, activeEvent)
+    if not button or not activeEvent or not RD.events or not RD.events.Subscribe then return end
+    local glow = button:CreateTexture(nil, "OVERLAY")
+    glow:SetAllPoints()
+    glow:SetTexture("Interface\\Buttons\\UI-Panel-Button-Highlight")
+    glow:SetBlendMode("ADD")
+    glow:Hide()
+    button.rdGlow = glow
+    local function Apply(active)
+        if glow then
+            if active then glow:Show() else glow:Hide() end
+        end
+    end
+    -- Estado inicial desde el módulo dueño (si existe)
+    local mod = RD.modules and RD.modules.autoLoot
+    if mod and mod.IsActive then
+        Apply(mod:IsActive())
+    end
+    RD.events:Subscribe(activeEvent, Apply)
+end
+
+-- Reevalúa la visibilidad de los botones de una barra (barItem.enabled) y
+-- reposiciona los visibles sin huecos. Devuelve el nº de botones visibles.
+function MenuFactory:UpdateBar(buttonBar)
+    if not buttonBar or not buttonBar.rdButtons then return 0 end
+    local size = buttonBar.rdSize or 27
+    local pad = buttonBar.rdPad or 2
+    -- Orden guardado aplicado EN VIVO: reordena las entradas (posición visual)
+    -- sin recrear botones. En RenderBar ya llegan ordenadas (no-op); en un
+    -- reorden desde la config, las posiciones siguen al orden de ui.actionBar.order.
+    buttonBar.rdButtons = self:OrderBySavedOrder(buttonBar.rdButtons,
+        SavedOrder("ui.actionBar.order"),
+        function(entry) return entry.item and entry.item.action end)
+    local n = 0
+    for _, entry in ipairs(buttonBar.rdButtons) do
+        local item = entry.item
+        local visible = true
+        if item and item.enabled then
+            if type(item.enabled) == "function" then
+                local ok, v = pcall(item.enabled)
+                visible = (ok and v ~= false)
+            else
+                visible = (item.enabled ~= false)
+            end
+        end
+        if visible then
+            n = n + 1
+            entry.button:Show()
+            entry.button:ClearAllPoints()
+            entry.button:SetPoint("LEFT", buttonBar, "LEFT", (n - 1) * (size + pad), -1)
+        else
+            entry.button:Hide()
+        end
+    end
+    local width = n > 0 and (n * (size + pad) - pad) or 0
+    if buttonBar.SetWidth then
+        buttonBar:SetWidth(width)
+    end
+    return n
 end
 
 RD.ui = RD.ui or {}

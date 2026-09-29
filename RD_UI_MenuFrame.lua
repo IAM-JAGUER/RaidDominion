@@ -68,13 +68,19 @@ function MenuFrame:Create()
     if self.frame then return self.frame end
 
     local frame = CreateFrame("Frame", "RaidDominionMenuFrame", UIParent)
-    -- Strata HIGH (no DIALOG): los StaticPopups de WoW (confirmaciones, edición
-    -- de Discord) viven en DIALOG y deben quedar SIEMPRE por encima de este menú.
-    -- Un frame del addon a DIALOG con Toplevel(true) taparía el popup y robaría
-    -- el foco del teclado (no se podía pegar en el EditBox). La v2 usaba HIGH.
-    frame:SetFrameStrata("HIGH")
-    frame:SetToplevel(true)
-    frame:SetClampedToScreen(true)
+    -- Strata MEDIUM (paridad con los paneles de personaje de WoW, que viven en
+    -- MEDIUM): el menú se cubre/descubre con la UI del juego como un panel
+    -- nativo y pasa al frente al activarlo. NO usar DIALOG: los StaticPopups de
+    -- WoW (confirmaciones, edición de Discord) viven en DIALOG y deben quedar
+    -- SIEMPRE por encima de este menú (un frame del addon a DIALOG con
+    -- Toplevel(true) taparía el popup y robaría el foco del teclado).
+    if RD.UIUtils and RD.UIUtils.SetupWindow then
+        RD.UIUtils.SetupWindow(frame)
+    else
+        frame:SetFrameStrata("MEDIUM")
+        frame:SetToplevel(true)
+        frame:SetClampedToScreen(true)
+    end
     frame:EnableMouse(true)
 
     -- Clic derecho sobre el fondo del menú = regresar al menú anterior.
@@ -104,10 +110,8 @@ function MenuFrame:Create()
         RD.UIUtils.TrackScale(frame)
     end
 
-    -- Clic sobre el fondo del menú lo sube al frente (ventanas del addon)
-    if RD.UIUtils and RD.UIUtils.MakeClickToTop then
-        RD.UIUtils.MakeClickToTop(frame)
-    end
+    -- Clic sobre el fondo del menú lo sube al frente (ventanas del addon).
+    -- Lo aplica SetupWindow (toplevel + Raise en OnMouseDown).
 
     -- Backdrop estilo v2
     frame:SetBackdrop({
@@ -173,7 +177,11 @@ function MenuFrame:Create()
             if self.currentSource and self.currentSource.type == "list" and key == self.currentSource.key then
                 if self.isShown and self.frame then
                     if not InCombatLockdown() then
-                        self:RenderCurrentMenu()
+                        -- Debounce (Refresh difiere 0.15 s): editar una lista con
+                        -- el menú abierto dispara varios Sets encadenados; antes
+                        -- cada uno re-renderizaba el menú al instante (ráfaga de
+                        -- creación de frames). El render final es idéntico.
+                        self:Refresh()
                     else
                         -- En combate no se crean frames: se difiere al salir.
                         self.pendingCombatAction = true
@@ -224,8 +232,12 @@ function MenuFrame:Show()
         self.needsRefresh = false
         self:RenderCurrentMenu()
     end
-    self.frame:Show()
-    self.frame:Raise()
+    if RD.UIUtils and RD.UIUtils.ActivateWindow then
+        RD.UIUtils.ActivateWindow(self.frame)
+    else
+        self.frame:Show()
+        self.frame:Raise()
+    end
     self.isShown = true
     if RD.events and RD.events.Publish then
         RD.events:Publish("UI_SHOW")
@@ -376,6 +388,13 @@ function MenuFrame:RenderCurrentMenu()
                 defs = RD.constants.MENU_DEFINITIONS["MainFrameOptions"]
             end
         end
+        -- Orden del usuario (ui.menu.itemOrder): solo el menú principal se
+        -- reordena (se arrastra el grip de una pestaña de la config). Se aplica
+        -- sobre una COPIA: la tabla de constantes nunca se muta.
+        if self.currentSource.key == "MainFrameOptions"
+            and RD.ui and RD.ui.menuFactory and RD.ui.menuFactory.OrderMainDefs then
+            defs = RD.ui.menuFactory:OrderMainDefs(defs)
+        end
     elseif self.currentSource.type == "list" then
         local list = {}
         if RD.config and RD.config.Get then
@@ -395,6 +414,17 @@ function MenuFrame:RenderCurrentMenu()
             local assignments = {}
             if assignable and RD.config and RD.config.Get then
                 assignments = RD.config:Get("assignments." .. self.currentSource.key, {})
+            end
+            -- Palabras de anuncio del botón de asignación (tooltip "Asignación
+            -- rápida"): `word` (clic en el texto del ítem) y `assignWord` (clic
+            -- derecho en el icono). Se muestran en el tooltip del icono.
+            local clickWord, clickRightWord = nil, nil
+            if assignable and RD.config and RD.config.Get then
+                local saved = RD.config:Get("announce." .. self.currentSource.key, nil)
+                if type(saved) == "table" then
+                    clickWord = saved.word
+                    clickRightWord = saved.assignWord
+                end
             end
             defs = {}
             local hadItems = false
@@ -439,6 +469,8 @@ function MenuFrame:RenderCurrentMenu()
                             assignable = assignable,
                             assigned = (type(assignments) == "table" and itemName) and assignments[itemName] or nil,
                             active = isActiveRule,
+                            clickWord = clickWord,
+                            clickRightWord = clickRightWord,
                         }
                     end
                 end
@@ -466,14 +498,14 @@ function MenuFrame:RenderCurrentMenu()
                 if hadItems then
                     defs[#defs + 1] = {
                         name = "Todos los elementos están ocultos",
-                        tooltip = "Actívalos con el botón-ojo en Configuración > la pestaña de esta lista.",
+                        tooltip = "Actívalos con el botón-ojo de la pestaña de esa lista en Configuración.",
                         isHint = true,
                     }
                 else
                     defs[#defs + 1] = {
                         name = emptyLabels[self.currentSource.key] or ("No hay ítems registrados"),
                         action = emptyActions[self.currentSource.key],
-                        tooltip = "Crea los elementos desde la configuración (Opciones > Configuración)",
+                        tooltip = "Crea los elementos desde la configuración (Configuración)",
                     }
                 end
                 -- Aviso temporal: el clic derecho regresa al menú anterior
@@ -535,6 +567,15 @@ function MenuFrame:RenderCurrentMenu()
                 self:ToggleAssignment(item)
             end
         end,
+        onIconRightClick = function(item, iconButton)
+            -- Clic derecho en el botón de asignación: anunciar el elemento con
+            -- la palabra configurada (announce.<lista>.assignWord).
+            if item.isBand then
+                self:AnnounceBand(item)
+            else
+                self:AnnounceAssign(item)
+            end
+        end,
     })
 
     self.content.menuFrame = menu
@@ -545,13 +586,14 @@ function MenuFrame:RenderCurrentMenu()
     self.content:SetPoint("TOPLEFT", self.frame, "TOPLEFT", CONTENT_OFFSET_X, -CONTENT_OFFSET_Y)
     self.content:SetSize(w, h)
 
-    -- Barra de botones inferior centrada en la base del marco
+    -- Barra de botones inferior centrada en la base del marco. Se renderiza UNA
+    -- vez y UpdateBar reevalúa cada render la visibilidad (barItem.enabled) y
+    -- reposiciona los visibles sin huecos, ajustando el ancho de la barra.
     local barItems = (RD.constants and RD.constants.ACTION_BAR and RD.constants.ACTION_BAR.ITEMS) or {}
     local barSize = (RD.constants and RD.constants.ACTION_BAR and RD.constants.ACTION_BAR.BUTTON_SIZE) or 20
     local barPad = (RD.constants and RD.constants.ACTION_BAR and RD.constants.ACTION_BAR.BUTTON_PADDING) or 4
-    local barWidth = math.max(0, #barItems * (barSize + barPad) - barPad)
+    local visibleBar = 0
     if #barItems > 0 and self.actionBar and RD.ui and RD.ui.menuFactory then
-        self.actionBar:SetWidth(barWidth)
         self.actionBar:SetPoint("BOTTOM", self.frame, "BOTTOM", 0, BAR_BOTTOM)
         if not self.actionBar.rendered then
             RD.ui.menuFactory:RenderBar(self.actionBar, barItems, {
@@ -564,8 +606,8 @@ function MenuFrame:RenderCurrentMenu()
                 end,
             })
             self.actionBar.rendered = true
-            -- Re-setear las texturas poco después: en 3.3.5a los iconos creados
-            -- al entrar al mundo a veces no cargan hasta que se re-asignan.
+            -- Re-setear texturas poco después: en 3.3.5a los iconos nuevos a
+            -- veces no cargan hasta re-asignarlos.
             local mm = RD.modules and RD.modules.messageManager
             if mm and mm.Schedule then
                 mm:Schedule(0.5, function()
@@ -578,10 +620,15 @@ function MenuFrame:RenderCurrentMenu()
                 end)
             end
         end
+        if RD.ui.menuFactory.UpdateBar then
+            visibleBar = RD.ui.menuFactory:UpdateBar(self.actionBar) or 0
+        else
+            visibleBar = #barItems
+        end
     end
+    local barWidth = math.max(0, visibleBar * (barSize + barPad) - barPad)
 
-    -- Redimensionar el marco para que contenga SIEMPRE contenido y barra,
-    -- con margen simétrico de 8px a los lados (enteros).
+    -- Redimensionar el marco para contener SIEMPRE contenido y barra (margen 8px).
     local sideMargin = 8
     local frameWidth = math.max(w + 2 * sideMargin, barWidth + 2 * sideMargin)
     local frameHeight = CONTENT_OFFSET_Y + h + BAR_HEIGHT + BAR_BOTTOM + BAR_BOTTOM_PAD

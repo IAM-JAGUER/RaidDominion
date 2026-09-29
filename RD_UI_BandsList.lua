@@ -16,6 +16,25 @@ local RD = _G.RaidDominion or {}
 _G.RaidDominion = RD
 
 local List = {}
+-- Construye el texto del whisper de invitación (función PURA testeable): el
+-- enlace de Discord es config libre, se sanea de caracteres de control (no debe
+-- inyectar saltos de línea en el whisper) y se acota para que el mensaje nunca
+-- exceda el límite de 255 del canal.
+function List:InviteWhisperText(bandName, minGS, roleKey, discord)
+    local roleText = ({ tank = "tanque", healer = "healer", rango = "rango", melee = "melee" })[roleKey]
+    local tpl
+    if roleText then
+        tpl = string.format("¡Te invito a la banda %s! Te necesitamos como %s. Gearscore mínimo %d.",
+            bandName or "?", roleText, tonumber(minGS) or 0)
+    else
+        tpl = string.format("¡Te invito a la banda %s! Gearscore mínimo %d.",
+            bandName or "?", tonumber(minGS) or 0)
+    end
+    discord = tostring(discord or ""):gsub("[%c]", " "):gsub("^%s*(.-)%s*$", "%1")
+    if #discord > 90 then discord = discord:sub(1, 90) end
+    if discord ~= "" then tpl = tpl .. " || Discord: " .. discord end
+    return tpl
+end
 
 local GOLD_R, GOLD_G, GOLD_B = unpack((RD.constants and RD.constants.COLORS and RD.constants.COLORS.GOLD) or { 1, 0.82, 0 })
 local ROW_H = 24
@@ -180,9 +199,12 @@ local function BuildPlayerRow(self, child, player)
         end
     end)
     nameBtn:SetScript("OnEnter", function()
+        if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+            GameTooltip:Hide()
+            return
+        end
         GameTooltip:SetOwner(nameBtn, "ANCHOR_RIGHT")
         GameTooltip:SetText(player.name, 1, 1, 1)
-        GameTooltip:AddLine(string.format("Clase: %s", (player.class ~= "" and player.class) or "Desconocida"), 1, 0.82, 0, true)
         -- Incluye la nota si el jugador tiene una
         if player.notes and player.notes ~= "" then
             GameTooltip:AddLine("Nota: " .. tostring(player.notes), 1, 1, 1, true)
@@ -265,9 +287,13 @@ local function BuildPlayerRow(self, child, player)
     -- Tooltip del campo asistencia (solo en los controles - / +; el dato no):
     -- sugiere que la asistencia mide el compromiso/fidelidad del jugador.
     local function AttEnter(self)
+        if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+            GameTooltip:Hide()
+            return
+        end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:SetText("Asistencia", 1, 1, 1, 1, true)
-        GameTooltip:AddLine("Mide el compromiso y la fidelidad del jugador con la banda (se acumula en cada banda).", 1, 1, 1, true)
+        GameTooltip:AddLine("Compromiso del jugador con la banda.", 1, 1, 1, true)
         GameTooltip:AddLine("- / +: ajustar manualmente", GOLD_R, GOLD_G, GOLD_B, true)
         GameTooltip:Show()
     end
@@ -305,10 +331,13 @@ local function BuildPlayerRow(self, child, player)
     whisperTex:SetTexture("Interface\\Icons\\INV_Letter_06")
     whisperBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
     whisperBtn:SetScript("OnEnter", function(self)
+        if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+            GameTooltip:Hide()
+            return
+        end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:SetText("Susurrar invitación", 1, 0.82, 0, 1, true)
-        GameTooltip:AddLine("Envía a este jugador una plantilla de invitación con los datos de la banda.", 1, 1, 1, true)
-        GameTooltip:AddLine("Si estás en una pestaña de rol, la invitación indica ese rol.", 1, 1, 1, true)
+        GameTooltip:AddLine("Envía una invitación con los datos de la banda.", 1, 1, 1, true)
         GameTooltip:Show()
     end)
     whisperBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -316,18 +345,17 @@ local function BuildPlayerRow(self, child, player)
         local b = Bands()
         local band = b and b:GetBand(self.bandIndex)
         if not band or not player.name or player.name == "" then return end
-        local minGS = tonumber(band.minGS) or 0
-        local roleText = ({ tank = "tanque", healer = "healer", rango = "rango", melee = "melee" })[self.category]
-        local tpl
-        if roleText then
-            tpl = string.format("¡Te invito a la banda %s! Te necesitamos como %s. GS mínimo %d.",
-                band.name or "?", roleText, minGS)
-        else
-            tpl = string.format("¡Te invito a la banda %s! GS mínimo %d.",
-                band.name or "?", minGS)
-        end
         local discord = (RD.config and RD.config.Get and RD.config:Get("chat.discordLink", "")) or ""
-        if discord ~= "" then tpl = tpl .. " || Discord: " .. discord end
+        local tpl = List:InviteWhisperText(band.name, band.minGS, self.category, discord)
+        -- Por el embudo: trocea si es largo y espacia por destinatario.
+        local mm = RD.modules and RD.modules.messageManager
+        if mm and mm.SendWhisper then
+            mm:SendWhisper(tpl, player.name)
+            if RD.messageManager and RD.messageManager.SendSystemMessage then
+                RD.messageManager:SendSystemMessage(string.format("|cff33ff99[RaidDominion]|r Invitación susurrada a %s.", player.name))
+            end
+            return
+        end
         local ok, err = pcall(SendChatMessage, tpl, "WHISPER", nil, player.name)
         if ok then
             if RD.messageManager and RD.messageManager.SendSystemMessage then
@@ -349,9 +377,13 @@ local function BuildPlayerRow(self, child, player)
     inviteTex:SetTexture("Interface\\Icons\\INV_Misc_GroupNeedMore")
     inviteBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
     inviteBtn:SetScript("OnEnter", function(self)
+        if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+            GameTooltip:Hide()
+            return
+        end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:SetText("Invitar a la banda", 1, 0.82, 0, 1, true)
-        GameTooltip:AddLine("Invita a este jugador al grupo/banda si está cerca.", 1, 1, 1, true)
+        GameTooltip:AddLine("Invita al grupo/banda si está cerca.", 1, 1, 1, true)
         GameTooltip:Show()
     end)
     inviteBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -382,6 +414,10 @@ local function BuildPlayerRow(self, child, player)
     delTex:SetTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
     delBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
     delBtn:SetScript("OnEnter", function(self)
+        if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+            GameTooltip:Hide()
+            return
+        end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:SetText("Eliminar jugador de la banda", 1, 0.82, 0, 1, true)
         GameTooltip:Show()

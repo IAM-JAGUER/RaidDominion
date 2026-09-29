@@ -1,9 +1,11 @@
 --[[
     RD_UI_Widgets_List.lua
-    PROPÓSITO: Editor de listas configurables (CreateList) + selector de iconos
-              en cuadrícula estilo WoW con recogida de iconos del juego.
-              Vive en un archivo aparte para mantener RD_UI_Widgets.lua
-              dentro del límite de ~700 líneas. Registra RD.ui.widgets:CreateList.
+    PROPÓSITO: Editor de listas configurables (CreateList): filas con nombre
+              editable, selector de iconos, visibilidad, drag & drop y
+              privacidad ante "Obtener". Vive en un archivo aparte para
+              mantener RD_UI_Widgets.lua dentro del límite de ~700 líneas.
+              El scroll con barra personalizada y el selector de iconos viven
+              en RD_UI_Widgets_IconPicker.lua (se carga antes en el .toc).
     API PÚBLICA:
         - RD.ui.widgets:CreateList(parent, field, onChange)
     EVENTOS: Ninguno. Escribe vía RD.config:Set (dispara CONFIG_CHANGED).
@@ -24,348 +26,15 @@ local UniqueName = Widgets.UniqueName
 local GetValue = Widgets.GetValue
 local SetValue = Widgets.SetValue
 local EnableTabNavigation = RD.UIUtils and RD.UIUtils.EnableTabNavigation
+local Log = (RD.UIUtils and RD.UIUtils.Log) or function(msg) print(msg) end
+
+-- Helpers compartidos: el scroll con barra personalizada y el selector de
+-- iconos viven en RD_UI_Widgets_IconPicker.lua (se carga antes en el .toc y
+-- cuelga ambos de la tabla compartida RD.ui.widgets).
+local CreateScrollFrame = Widgets.CreateScrollFrame
+local OpenIconPicker = Widgets.OpenIconPicker
 
 local DEFAULT_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
-
--- =============================================
--- SCROLL FRAME CON BARRA PERSONALIZADA
--- La barra se ancla a la DERECHA del scroll, junto al contenido (no en el
--- borde de un área vacía), con margen controlado y rueda del ratón.
--- =============================================
-
-local function CreateScrollFrame(parent, width, height, x, y)
-    local scroll = CreateFrame("ScrollFrame", UniqueName("Scr"), parent)
-    scroll:SetSize(width, height)
-    scroll:SetPoint("TOPLEFT", parent, "TOPLEFT", x or 0, y or 0)
-    scroll:EnableMouseWheel(true)
-
-    local child = CreateFrame("Frame", nil, scroll)
-    child:SetWidth(width)
-    scroll:SetScrollChild(child)
-
-    local bar = CreateFrame("Slider", UniqueName("Bar"), parent, "UIPanelScrollBarTemplate")
-    bar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 4, -8)
-    bar:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", 4, 8)
-
-    -- `syncing` evita retroalimentación y errores durante la inicialización:
-    -- Slider:SetValue dispara OnValueChanged aunque se llame al crear la barra.
-    local syncing = true
-    bar:SetScript("OnValueChanged", function(self, value)
-        if not syncing and scroll and scroll.SetVerticalScroll then
-            scroll:SetVerticalScroll(value)
-        end
-    end)
-    scroll:SetScript("OnVerticalScroll", function(self, offset)
-        syncing = true
-        self.scrollBar:SetValue(offset)
-        syncing = false
-    end)
-    scroll:SetScript("OnScrollRangeChanged", function(self, xrange, yrange)
-        local b = self.scrollBar
-        if yrange <= 0 then
-            b:Hide()
-        else
-            b:Show()
-            b:SetMinMaxValues(0, yrange)
-            b:SetValueStep(math.max(1, yrange / 16))
-        end
-    end)
-    scroll:SetScript("OnMouseWheel", function(self, delta)
-        local b = self.scrollBar
-        local _, max = b:GetMinMaxValues()
-        local val = self:GetVerticalScroll() - delta * 16
-        if val < 0 then val = 0 end
-        if val > max then val = max end
-        if self.SetVerticalScroll then
-            self:SetVerticalScroll(val)
-        end
-    end)
-
-    scroll.scrollBar = bar
-    bar:SetMinMaxValues(0, 0)
-    bar:SetValueStep(1)
-    bar:SetValue(0)
-    bar:Hide()
-    syncing = false
-
-    return scroll, child
-end
-
--- =============================================
--- SELECTOR DE ICONOS (cuadrícula estilo WoW)
--- Recoge los iconos del juego (GetSpellInfo sobre los IDs de hechizo) y los
--- muestra junto a la lista curada, sin que el usuario necesite conocer nombres
--- de texturas.
--- =============================================
-
-local pickerFrame = nil
-
-local ICON_LIST = nil          -- lista completa una vez recogida
-local ICON_SEEN = {}           -- dedupe de texturas
-
--- Paginación del selector: solo se construyen los botones de la página pedida
--- (lazy load a petición). Con ~2000 iconos, crear todos en cada apertura era un
--- golpe de rendimiento; por página se crean ~PAGE_SIZE botones.
-local PAGE_SIZE = 100          -- iconos por página
-local pickerPage = 1           -- página activa
-local totalPages = 1           -- total de páginas
-
-local function CuratedIcons()
-    local list = {}
-    local curated = (RD.constants and RD.constants.ICON_PICKER_LIST) or {}
-    for _, icon in ipairs(curated) do
-        if not ICON_SEEN[icon] then
-            ICON_SEEN[icon] = true
-            list[#list + 1] = icon
-        end
-    end
-    return list
-end
-
--- Recoge los iconos de los hechizos del juego en una sola pasada (sin C_Timer).
--- Se ejecuta una única vez en PLAYER_LOGIN (vía Widgets.CollectIcons) para no
--- congelar la apertura del selector. Usa GetSpellInfo (API 3.3.5a) cuyo tercer
--- valor de retorno es la textura del icono. Se acota el número de iconos únicos
--- para mantener la carga razonable. El icono por defecto (elementos sin imagen)
--- SIEMPRE está primero, para poder re-seleccionar el estado "sin icono".
-local function BuildFullIconList()
-    if ICON_LIST then return ICON_LIST end
-    local list = {}
-    if not ICON_SEEN[DEFAULT_ICON] then
-        ICON_SEEN[DEFAULT_ICON] = true
-        list[#list + 1] = DEFAULT_ICON
-    end
-    for _, icon in ipairs(CuratedIcons()) do
-        list[#list + 1] = icon
-    end
-    local MAX_ID = 70000
-    local MAX_UNIQUE = 2000
-    -- Heurística anti-hitche: si ya hay suficientes iconos y se barren muchos IDs
-    -- consecutivos sin encontrar uno nuevo (rangos dispersos hacia 70k), se corta.
-    local MAX_GAP = 20000
-    local MIN_ICONS = 200
-    local sinceNew = 0
-    for i = 1, MAX_ID do
-        local icon = select(3, GetSpellInfo(i))
-        if icon and icon ~= "" and not ICON_SEEN[icon] then
-            ICON_SEEN[icon] = true
-            list[#list + 1] = icon
-            sinceNew = 0
-            if #list >= MAX_UNIQUE then break end
-        else
-            sinceNew = sinceNew + 1
-            if sinceNew >= MAX_GAP and #list >= MIN_ICONS then break end
-        end
-    end
-    ICON_LIST = list
-    return list
-end
-
--- Construye la cuadrícula de botones de la PÁGINA ACTIVA (lazy load por página).
--- Solo se crean los botones de la página actual; al cambiar de página se
--- reconstruye esa página. La lista completa ya está en caché.
-local function BuildPickerGrid()
-    for _, btn in ipairs(pickerFrame.buttons) do
-        btn:Hide()
-        btn:SetParent(nil)
-    end
-    pickerFrame.buttons = {}
-
-    local list = BuildFullIconList()
-    totalPages = math.max(1, math.ceil(#list / PAGE_SIZE))
-    if pickerPage < 1 then pickerPage = 1 end
-    if pickerPage > totalPages then pickerPage = totalPages end
-
-    local cell = 36
-    local cols = math.max(4, math.floor((pickerFrame.child:GetWidth() or 412) / cell))
-    local currentIcon = pickerFrame.current
-
-    local first = (pickerPage - 1) * PAGE_SIZE + 1
-    local last = math.min(#list, first + PAGE_SIZE - 1)
-    local n = 0
-    for i = first, last do
-        local icon = list[i]
-        n = n + 1
-        local col = (n - 1) % cols
-        local row = math.floor((n - 1) / cols)
-        local btn = CreateFrame("Button", nil, pickerFrame.child)
-        btn:SetSize(32, 32)
-        btn:SetPoint("TOPLEFT", pickerFrame.child, "TOPLEFT", col * cell, -row * cell)
-
-        local tex = btn:CreateTexture(nil, "ARTWORK")
-        tex:SetAllPoints()
-        tex:SetTexture(icon)
-
-        local hl = btn:CreateTexture(nil, "HIGHLIGHT")
-        hl:SetAllPoints()
-        hl:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
-        hl:SetBlendMode("ADD")
-
-        if icon == currentIcon then
-            local ring = btn:CreateTexture(nil, "OVERLAY")
-            ring:SetAllPoints()
-            ring:SetTexture("Interface\\Buttons\\UI-EmptySlot")
-            ring:SetVertexColor(1, 0.82, 0, 1)
-        end
-
-        btn:SetScript("OnClick", function()
-            local cb = pickerFrame and pickerFrame.callback
-            pickerFrame:Hide()
-            if cb then cb(icon) end
-        end)
-
-        pickerFrame.buttons[#pickerFrame.buttons + 1] = btn
-    end
-    pickerFrame.child:SetHeight(math.ceil(n / cols) * cell)
-
-    -- Navegación de páginas (SetEnabled no existe en 3.3.5a: se usa
-    -- SetButtonState, visual; los OnClick ya guardan los límites de página)
-    if pickerFrame.pageLabel then
-        pickerFrame.pageLabel:SetText(string.format("Página %d / %d", pickerPage, totalPages))
-        if pickerFrame.prevBtn.SetButtonState then
-            pickerFrame.prevBtn:SetButtonState(pickerPage > 1 and "NORMAL" or "DISABLED")
-        end
-        if pickerFrame.nextBtn.SetButtonState then
-            pickerFrame.nextBtn:SetButtonState(pickerPage < totalPages and "NORMAL" or "DISABLED")
-        end
-    end
-end
-
--- Abre el selector de iconos junto al frame ancla. callback(iconPath) recibe
--- el path de textura elegido.
-local function OpenIconPicker(anchor, callback, current)
-    if not anchor or type(callback) ~= "function" then return end
-
-    if not pickerFrame then
-        pickerFrame = CreateFrame("Frame", "RDIconPicker", UIParent)
-        pickerFrame:SetFrameStrata("HIGH")
-        pickerFrame:SetToplevel(true)
-        pickerFrame:SetClampedToScreen(true)
-        pickerFrame:SetSize(460, 420)
-        pickerFrame:EnableMouse(true)
-
-        -- Arrastrable desde cualquier zona no interactiva (título/fondo/espacio
-        -- vacío); los botones de la cuadrícula capturan su propio clic.
-        pickerFrame:SetMovable(true)
-        pickerFrame:RegisterForDrag("LeftButton")
-        pickerFrame:SetScript("OnDragStart", function()
-            pickerFrame:StartMoving()
-        end)
-        pickerFrame:SetScript("OnDragStop", function()
-            pickerFrame:StopMovingOrSizing()
-        end)
-
-        pickerFrame:SetBackdrop({
-            bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-            tile = true, tileSize = 16, edgeSize = 12,
-            insets = { left = 4, right = 4, top = 4, bottom = 4 },
-        })
-        pickerFrame:SetBackdropColor(0, 0, 0, 0.95)
-        pickerFrame:SetBackdropBorderColor(1, 1, 1, 0.5)
-        pickerFrame.buttons = {}
-        if RD.UIUtils and RD.UIUtils.TrackScale then RD.UIUtils.TrackScale(pickerFrame) end
-
-        -- Fondo modal: clic fuera cierra el selector
-        local catcher = CreateFrame("Frame", nil, UIParent)
-        catcher:SetFrameStrata("HIGH")
-        catcher:SetAllPoints(UIParent)
-        catcher:EnableMouse(true)
-        catcher:SetScript("OnMouseUp", function()
-            if pickerFrame then pickerFrame:Hide() end
-        end)
-        pickerFrame.catcher = catcher
-        pickerFrame:SetScript("OnHide", function()
-            if pickerFrame and pickerFrame.catcher then pickerFrame.catcher:Hide() end
-            if pickerFrame then pickerFrame.callback = nil end
-        end)
-
-        local title = pickerFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        title:SetPoint("TOP", pickerFrame, "TOP", 0, -8)
-        title:SetText("Selecciona un icono")
-
-        local closeBtn = CreateFrame("Button", UniqueName("Cl"), pickerFrame, "UIPanelCloseButton")
-        closeBtn:SetPoint("TOPRIGHT", pickerFrame, "TOPRIGHT", -4, -4)
-        closeBtn:SetScript("OnClick", function()
-            pickerFrame:Hide()
-        end)
-
-        -- Scroll con barra personalizada a la derecha del contenido (más espacio);
-        -- se deja sitio abajo para la navegación de páginas.
-        local scroll, child = CreateScrollFrame(pickerFrame, 412, 320, 8, -30)
-        pickerFrame.scroll = scroll
-        pickerFrame.child = child
-
-        -- Navegación de páginas (lazy load por página). Etiquetas de texto:
-        -- los glifos ◀/▶ no existen en la fuente de 3.3.5a (renderizan "?").
-        local prevBtn = RD.UIUtils.MakeChipButton(pickerFrame, UniqueName("Np"), 84, 24)
-        prevBtn:SetText("Anterior")
-        prevBtn:SetPoint("BOTTOMLEFT", pickerFrame, "BOTTOMLEFT", 12, 12)
-        prevBtn:SetScript("OnClick", function()
-            if pickerPage > 1 then
-                pickerPage = pickerPage - 1
-                BuildPickerGrid()
-            end
-        end)
-        pickerFrame.prevBtn = prevBtn
-
-        local pageLabel = pickerFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        pageLabel:SetText("Página 1 / 1")
-        pageLabel:SetPoint("BOTTOM", pickerFrame, "BOTTOM", 0, 16)
-        RD.UIUtils.ScaleFont(pageLabel, 1.25)
-        pickerFrame.pageLabel = pageLabel
-
-        local nextBtn = RD.UIUtils.MakeChipButton(pickerFrame, UniqueName("Nx"), 84, 24)
-        nextBtn:SetText("Siguiente")
-        nextBtn:SetPoint("BOTTOMRIGHT", pickerFrame, "BOTTOMRIGHT", -12, 12)
-        nextBtn:SetScript("OnClick", function()
-            if pickerPage < totalPages then
-                pickerPage = pickerPage + 1
-                BuildPickerGrid()
-            end
-        end)
-        pickerFrame.nextBtn = nextBtn
-    end
-
-    pickerFrame.callback = callback
-    pickerFrame.current = current
-
-    -- Un elemento sin imagen (icono vacío) se muestra con el icono por defecto;
-    -- así el estado "sin icono" queda representado y re-seleccionable.
-    if pickerFrame.current == "" or pickerFrame.current == nil then
-        pickerFrame.current = DEFAULT_ICON
-    end
-
-    -- Salta a la página donde está el icono actual (si existe); si no, página 1
-    local list = BuildFullIconList()
-    local idx = nil
-    for i, icon in ipairs(list) do
-        if icon == pickerFrame.current then idx = i break end
-    end
-    if idx then
-        pickerPage = math.max(1, math.ceil(idx / PAGE_SIZE))
-    else
-        pickerPage = 1
-    end
-
-    -- La lista ya está precargada en PLAYER_LOGIN (Widgets.CollectIcons);
-    -- BuildPickerGrid usa BuildFullIconList (caché) directamente.
-    BuildPickerGrid()
-
-    pickerFrame:ClearAllPoints()
-    pickerFrame:SetPoint("BOTTOMLEFT", anchor, "TOPLEFT", 0, 8)
-    if RD.UIUtils and RD.UIUtils.ClampModalToScreen then
-        RD.UIUtils.ClampModalToScreen(pickerFrame, pickerFrame.scroll, 20)
-    end
-    pickerFrame.catcher:Show()
-    pickerFrame:Show()
-    pickerFrame:Raise()
-
-    local layout = RD.ui and RD.ui.layout
-    if layout and layout.EnsureVisible then
-        layout:EnsureVisible(pickerFrame, 8)
-    end
-end
 
 -- =============================================
 -- LIST EDITOR (lista de { name, icon } configurable)
@@ -393,10 +62,50 @@ function Widgets:CreateList(parent, field, onChange)
     local childW = scrollW
     local rowH = 24
     local gap = 2
+    -- Franja fija de creación (Añadir), siempre visible FUERA de la zona de scroll
+    local ADD_H = 24
+    local GAP_H = 2
+    -- Fila de privacidad de la lista ("Obtener"): vive dentro de la franja de
+    -- creación, sobre el scroll.
+    local PRIV_H = 22
 
-    -- Scroll con barra personalizada (la barra queda a la derecha del contenido)
-    local scroll, child = CreateScrollFrame(parent, scrollW, height)
+    -- Scroll con barra personalizada (la barra queda a la derecha del contenido).
+    -- El scroll se ancla BAJO la franja de creación (offset -(franja + privacidad)).
+    local scroll, child = CreateScrollFrame(parent, scrollW, height, 0, -(ADD_H + GAP_H + PRIV_H + GAP_H))
     child:SetWidth(childW)
+    -- El viewport del scroll consume el clic en su zona vacía (franja inferior
+    -- de la lista) para que NO atraviese a los widgets que quedan debajo del
+    -- editor en la ventana de configuración. Las filas (hijas del contenido)
+    -- quedan por encima y mantienen sus propios clics.
+    scroll:EnableMouse(true)
+    scroll:SetScript("OnMouseDown", function() end)
+    scroll:SetScript("OnMouseUp", function() end)
+    -- La fila de la ventana de config que aloja el editor también consume el
+    -- clic en toda su zona vacía: en 3.3.5a el child del scroll sobresale del
+    -- viewport por el borde inferior (cola del contenido que no cabe) y ese área,
+    -- al quedar fuera del rect del scroll, dejaría caer el clic a través de él
+    -- hasta la sección siguiente (p.ej. el título/controles "Anuncios..." que
+    -- quedan debajo de la lista). El parent, con EnableMouse, bloquea esa fuga;
+    -- los controles (addBar, filas, viewport) son hijos y ganan en su propia zona.
+    parent:EnableMouse(true)
+    parent:SetScript("OnMouseDown", function() end)
+    parent:SetScript("OnMouseUp", function() end)
+
+    -- Franja de creación anclada al TOP del editor: nombre + icono + Añadir +
+    -- Obtener/Reiniciar. No forma parte del scroll (no se desplaza ni se oculta).
+    -- EnableMouse: la franja captura el clic en su zona vacía para que NO caiga
+    -- a través sobre los elementos que quedan debajo del editor.
+    local addBar = CreateFrame("Frame", nil, parent)
+    addBar:SetSize(childW, ADD_H + GAP_H + PRIV_H + GAP_H)
+    addBar:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, 0)
+    addBar:EnableMouse(true)
+    addBar:SetScript("OnMouseDown", function() end)
+    addBar:SetScript("OnMouseUp", function() end)
+    -- En 3.3.5a el ScrollFrame no recorta el ratón de su contenido: una fila que
+    -- asoma por el borde superior al hacer scroll solaparía esta franja. Elevar
+    -- su frame level sobre el scroll hace que la franja gane siempre el clic.
+    local scrollLevel = scroll and scroll.GetFrameLevel and scroll:GetFrameLevel() or 0
+    if addBar.SetFrameLevel then addBar:SetFrameLevel(scrollLevel + 5) end
 
     local itemRows = {}
     local BuildRows
@@ -417,9 +126,25 @@ function Widgets:CreateList(parent, field, onChange)
     end
 
     local function ClearRows()
+        -- Suelta foco/captura antes de ocultar: en 3.3.5a, ocultar o desanclar
+        -- una fila cuyo EditBox conserva el foco de teclado (el clic en un botón
+        -- NO lo libera) puede hacer que el frame se congele en pantalla como
+        -- fila fantasma. Un error en una fila no debe abortar la limpieza del
+        -- resto ni dejar el editor a medio reconstruir.
         for _, r in ipairs(itemRows) do
-            r:Hide()
-            r:SetParent(nil)
+            if r then
+                local ok, err = pcall(function(dead)
+                    local nb = dead.nameBox
+                    if nb and nb.ClearFocus then nb:ClearFocus() end
+                    if dead.nameBox then dead.nameBox:SetAutoFocus(false) end
+                    if dead.EnableMouse then dead:EnableMouse(false) end
+                    dead:Hide()
+                    dead:SetParent(nil)
+                end, r)
+                if not ok then
+                    Log("|cffff0000[RaidDominion]|r error limpiando la lista: " .. tostring(err))
+                end
+            end
         end
         itemRows = {}
     end
@@ -427,13 +152,13 @@ function Widgets:CreateList(parent, field, onChange)
     -- Fila superior: añadir elemento (nombre + selector de icono + botón)
     local pendingIcon = DEFAULT_ICON
 
-    local addName = CreateFrame("EditBox", UniqueName("ANm"), child, "InputBoxTemplate")
+    local addName = CreateFrame("EditBox", UniqueName("ANm"), addBar, "InputBoxTemplate")
     addName:SetSize(math.max(90, childW - 24 - 64 - 72 - 76 - 24), 22)
-    addName:SetPoint("TOPLEFT", child, "TOPLEFT", 6, 0)
+    addName:SetPoint("TOPLEFT", addBar, "TOPLEFT", 6, 0)
     addName:SetAutoFocus(false)
     RD.UIUtils.StyleInput(addName)
 
-    local addIconBtn = CreateFrame("Button", UniqueName("AIB"), child)
+    local addIconBtn = CreateFrame("Button", UniqueName("AIB"), addBar)
     addIconBtn:SetSize(24, 24)
     addIconBtn:SetPoint("LEFT", addName, "RIGHT", 4, 0)
     local addIconTex = addIconBtn:CreateTexture(nil, "ARTWORK")
@@ -446,22 +171,60 @@ function Widgets:CreateList(parent, field, onChange)
         end, pendingIcon)
     end)
     addIconBtn:SetScript("OnEnter", function(self)
+        if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+            GameTooltip:Hide()
+            return
+        end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Clic para elegir el icono", 1, 1, 1, 1, true)
+        GameTooltip:SetText("Clic: elegir el icono", 1, 1, 1, 1, true)
         GameTooltip:Show()
     end)
     addIconBtn:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
 
-    local addBtn = RD.UIUtils.MakeChipButton(child, UniqueName("AAd"), 64, 22)
+    -- Vista previa del icono del enlace: al escribir/pegar un enlace (ítem o
+    -- hechizo) se detecta su icono y se muestra en el selector ANTES de añadir.
+    -- Solo se toca el icono pendiente si se llega a detectar; si no, se respeta
+    -- el icono que el usuario haya elegido a mano. El helper MakeLinkAwareEditBox
+    -- muestra el texto visible del enlace pegado, así que el icono se detecta con
+    -- el RAW (addName:rdGetRaw()), no con el texto visible.
+    if RD.UIUtils and RD.UIUtils.MakeLinkAwareEditBox then
+        RD.UIUtils.MakeLinkAwareEditBox(addName, "", {
+            border = false,   -- el campo de añadir no precisa el borde indicador
+            tooltip = false,  -- la preview del icono ya indica que es un enlace
+            onChange = function(raw)
+                if RD.UIUtils and RD.UIUtils.LinkInfo then
+                    local icon = RD.UIUtils.LinkInfo(raw or "")
+                    if icon then
+                        pendingIcon = icon
+                        addIconTex:SetTexture(icon)
+                    end
+                end
+            end,
+        })
+    else
+        addName:SetScript("OnTextChanged", function(self, userInput)
+            if not userInput then return end
+            local icon = nil
+            if RD.UIUtils and RD.UIUtils.LinkInfo then
+                icon = RD.UIUtils.LinkInfo(self:GetText() or "")
+            end
+            if icon then
+                pendingIcon = icon
+                addIconTex:SetTexture(icon)
+            end
+        end)
+    end
+    -- rdGetRaw para leer el RAW al añadir (el campo puede mostrar solo el visible)
+    local addBtn = RD.UIUtils.MakeChipButton(addBar, UniqueName("AAd"), 64, 22)
     addBtn:SetText("Añadir")
     RD.UIUtils.AddButtonTooltip(addBtn, function() return "Añade el elemento escrito a la lista." end)
     addBtn:SetPoint("LEFT", addIconBtn, "RIGHT", 4, 0)
 
     -- Obtener del líder + Reiniciar (confirmaciones) vía helper compartido
     local actions = RD.ui and RD.ui.widgets and RD.ui.widgets.CreateListActionButtons
-        and RD.ui.widgets:CreateListActionButtons(child, addBtn, {
+        and RD.ui.widgets:CreateListActionButtons(addBar, addBtn, {
             listKey = key,
             label = field.label or key,
             obtainWidth = 72,
@@ -479,13 +242,42 @@ function Widgets:CreateList(parent, field, onChange)
             end,
         })
 
+    -- Privacidad de la lista ante "Obtener" (sobre la lista, en la franja fija).
+    if RD.ui and RD.ui.widgets and RD.ui.widgets.CreatePrivacyDropdown then
+        RD.ui.widgets:CreatePrivacyDropdown(addBar, key, { x = 6, y = -(ADD_H + GAP_H) })
+    end
+
+    -- (El botón "Spamear" de la pestaña de reglas se retiró; el spammer de
+    -- reglas se abre desde el menú flotante (submenú Reglas → Spamear reglas).)
+
+    -- La franja de creación (addBar) queda FUERA del scroll: no hay frames de
+    -- cabecera que ocultar por visibilidad ni que reconstruir en cada build.
+
     addBtn:SetScript("OnClick", function()
-        local name = strtrim(addName:GetText() or "")
+        -- Con el helper activo el campo puede mostrar solo el texto visible del
+        -- enlace; al añadir se lee SIEMPRE el raw (enlace re-inyectado o plano).
+        local raw = ""
+        if addName.rdGetRaw then
+            raw = addName.rdGetRaw() or ""
+        else
+            raw = addName:GetText() or ""
+        end
+        local name = strtrim(raw)
         if name == "" then
             addName:ClearFocus()
             return
         end
-        table.insert(list, { name = name, icon = pendingIcon })
+        -- Icono: ya lo detectó la vista previa en vivo (OnTextChanged); al añadir
+        -- se vuelve a comprobar por si la cache se resolvió entre medias. Solo se
+        -- usa el icono del enlace si se detecta; si no, el elegido por el usuario.
+        local detectedIcon = nil
+        if RD.UIUtils and RD.UIUtils.LinkInfo then
+            detectedIcon = RD.UIUtils.LinkInfo(name)
+        end
+        local icon = detectedIcon or pendingIcon
+        -- El nombre se conserva tal cual (un enlace pegado mantiene su formato y
+        -- color al anunciarlo); solo cambia el icono si se detecta.
+        table.insert(list, { name = name, icon = icon })
         addName:SetText("")
         addIconTex:SetTexture(DEFAULT_ICON)
         pendingIcon = DEFAULT_ICON
@@ -504,6 +296,16 @@ function Widgets:CreateList(parent, field, onChange)
     BuildRows = function()
         ClearRows()
 
+        -- Inválida el closure viejo de visibilidad ANTES de tocar el scroll:
+        -- child:SetHeight y SetVerticalScroll (más abajo) disparan
+        -- OnScrollRangeChanged/OnVerticalScroll, que invocan RDRefreshVisibility.
+        -- En 3.3.5a, ese closure (AÚN el anterior; el nuevo se instala al final
+        -- con ApplyScrollVisibility) referencia filas ya limpiadas y desancladas,
+        -- y al evaluarlas podría resolver coordenadas residuales que "intersecan"
+        -- el viewport y llamar Show() sobre ellas: las resucita como filas
+        -- fantasma pegadas al scroll child y ya no rastreables por itemRows.
+        scroll.RDRefreshVisibility = nil
+
         -- Los ítems se distribuyen en el máximo de columnas que caben según el
         -- ancho disponible (cada celda necesita un ancho mínimo), aprovechando
         -- todo el espacio del panel.
@@ -512,35 +314,53 @@ function Widgets:CreateList(parent, field, onChange)
         local cols = math.max(1, math.floor((childW + colGap) / (MIN_CELL + colGap)))
         local cellW = math.max(120, math.floor((childW - (cols - 1) * colGap) / cols))
         local gridRows = math.ceil(#list / cols)
-        local totalH = rowH + gap + gridRows * (rowH + gap)
+        -- Las filas arrancan en el TOP del scroll (la franja de creación quedó
+        -- fuera, arriba); el motor de drag usa firstTop = 0 (ver más abajo).
+        local totalH = gridRows * (rowH + gap)
 
         for i, item in ipairs(list) do
             local col = (i - 1) % cols
             local r = math.floor((i - 1) / cols)
             local row = CreateFrame("Frame", nil, child)
             row:SetSize(cellW, rowH)
-            row:SetPoint("TOPLEFT", child, "TOPLEFT", col * (cellW + colGap), -(rowH + gap) - r * (rowH + gap))
+            row:SetPoint("TOPLEFT", child, "TOPLEFT", col * (cellW + colGap), -r * (rowH + gap))
             RD.UIUtils.AddRowHover(row)
 
             -- Nombre editable (EditBox en línea). No hay icono a la izquierda:
             -- el único icono de la fila es el botón-toggle del selector (derecha).
+            -- Si el nombre es un enlace de chat se muestra SOLO el texto visible y,
+            -- al editar/guardar, se re-inyecta en el envoltorio sin dañarlo (lo
+            -- gestiona UIUtils.MakeLinkAwareEditBox; aquí solo se cablea el guardado
+            -- en vivo en item.name + SaveList).
             local nameBox = CreateFrame("EditBox", UniqueName("INm"), row, "InputBoxTemplate")
             nameBox:SetHeight(22)
             nameBox:SetPoint("LEFT", row, "LEFT", 6, 0)
-            nameBox:SetPoint("RIGHT", row, "RIGHT", -120, 0)
+            nameBox:SetPoint("RIGHT", row, "RIGHT", -96, 0)
             nameBox:SetAutoFocus(false)
-            nameBox:SetText(item.name)
             RD.UIUtils.StyleInput(nameBox)
-            local function SaveName(self)
-                item.name = strtrim(self:GetText() or "")
-                SaveList()
-                self:ClearFocus()
+            local linkAware = RD.UIUtils and RD.UIUtils.MakeLinkAwareEditBox
+            if linkAware then
+                -- El helper configura display (texto visible), borde azul, tooltip y
+                -- la re-inyección; el guardado SIEMPRE recibe el raw correcto.
+                linkAware(nameBox, item.name or "", {
+                    onChange = function(raw)
+                        item.name = raw
+                        SaveList()
+                    end,
+                    -- Enter/Esc liberan el foco (el guardado ya fue en vivo).
+                    onCommit = function() end,
+                })
+            else
+                -- Fallback plano (entorno de test sin el helper): sin re-inyección.
+                nameBox:SetText(item.name or "")
+                local function SavePlain()
+                    item.name = strtrim(nameBox:GetText() or "")
+                    SaveList()
+                end
+                nameBox:SetScript("OnTextChanged", SavePlain)
+                nameBox:SetScript("OnEnterPressed", function(self) SavePlain(); self:ClearFocus() end)
+                nameBox:SetScript("OnEscapePressed", function(self) SavePlain(); self:ClearFocus() end)
             end
-            -- En vivo mientras se escribe + confirmación con Enter/Esc (Enter/Esc
-            -- también liberan el foco para poder usar los atajos del teclado).
-            nameBox:SetScript("OnTextChanged", SaveName)
-            nameBox:SetScript("OnEnterPressed", SaveName)
-            nameBox:SetScript("OnEscapePressed", SaveName)
             row.nameBox = nameBox
 
             -- Botón de icono editable (abre el selector de iconos)
@@ -557,55 +377,76 @@ function Widgets:CreateList(parent, field, onChange)
                 end, item.icon)
             end)
             iconBtn:SetScript("OnEnter", function(self)
+                if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+                    GameTooltip:Hide()
+                    return
+                end
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetText("Clic para cambiar el icono", 1, 1, 1, 1, true)
+                GameTooltip:SetText("Clic: cambiar el icono", 1, 1, 1, 1, true)
                 GameTooltip:Show()
             end)
             iconBtn:SetScript("OnLeave", function()
                 GameTooltip:Hide()
             end)
 
-            -- Botón subir (reordenar: mueve el elemento una posición arriba)
-            local upBtn = CreateFrame("Button", UniqueName("IUp"), row)
-            upBtn:SetSize(20, 20)
-            local upTex = upBtn:CreateTexture(nil, "ARTWORK")
-            upTex:SetAllPoints()
-            upTex:SetTexture("Interface\\Buttons\\UI-ScrollBar-ScrollUpButton-Up")
-            upBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
-            upBtn:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetText("Subir en la lista", 1, 0.82, 0, 1, true)
-                GameTooltip:Show()
-            end)
-            upBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-            upBtn:SetScript("OnClick", function()
-                if i > 1 then
-                    list[i], list[i - 1] = list[i - 1], list[i]
-                    SaveList()
-                    BuildRows()
+            -- Agarre de arrastre: reordena la lista con click-drag → click-drop.
+            local grip = Widgets.CreateGrip and Widgets:CreateGrip(row)
+            -- Las 4 listas asignables (roles/habilidades/buffs/auras) comparten
+            -- la geometría de cuadrícula calculada más arriba en BuildRows.
+            if grip and Widgets.EnableRowDrag then
+                local dragParams = {
+                    scroll = scroll,
+                    child = child,
+                    cols = cols,
+                    cellW = cellW,
+                    colGap = colGap,
+                    rowH = rowH,
+                    gap = gap,
+                    -- Las filas arrancan en el top del scroll (la franja de
+                    -- creación quedó fuera), así que la primera fila cae a 0.
+                    firstTop = 0,
+                    gridRows = gridRows,
+                    source = i,
+                    itemCount = function() return #list end,
+                    label = item.name,
+                    commitTarget = function(target)
+                        local src = i
+                        if target < 1 then target = 1 end
+                        if target > #list + 1 then target = #list + 1 end
+                        if target == src or target == src + 1 then return end
+                        local temp = table.remove(list, src)
+                        local idx = target
+                        if idx > src then idx = idx - 1 end
+                        table.insert(list, idx, temp)
+                        SaveList()
+                        BuildRows()
+                    end,
+                }
+                -- Cross-tab (solo listas asignables): permite TRASLADAR el ítem a
+                -- la lista de OTRO tab soltándolo sobre su pestaña. La clave
+                -- destino es la de la zona (dropZone); la lista de origen es `key`.
+                if field.dropZones and key and RD.config then
+                    dragParams.dropZones = field.dropZones
+                    dragParams.onDropTo = function(targetKey)
+                        if not targetKey or targetKey == key then return end
+                        local moved = list[i]
+                        if not moved then return end
+                        table.remove(list, i)
+                        local target = {}
+                        local TV = RD.config.Get and RD.config:Get(targetKey, nil)
+                        if type(TV) == "table" then
+                            for _, v in ipairs(TV) do
+                                target[#target + 1] = { name = v.name or "", icon = v.icon or "", visible = v.visible }
+                            end
+                        end
+                        target[#target + 1] = { name = moved.name or "", icon = moved.icon or "", visible = moved.visible }
+                        if RD.config.Set then RD.config:Set(targetKey, target) end
+                        SaveList()
+                        BuildRows()
+                    end
                 end
-            end)
-
-            -- Botón bajar (reordenar: mueve el elemento una posición abajo)
-            local downBtn = CreateFrame("Button", UniqueName("IDn"), row)
-            downBtn:SetSize(20, 20)
-            local dnTex = downBtn:CreateTexture(nil, "ARTWORK")
-            dnTex:SetAllPoints()
-            dnTex:SetTexture("Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Up")
-            downBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
-            downBtn:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetText("Bajar en la lista", 1, 0.82, 0, 1, true)
-                GameTooltip:Show()
-            end)
-            downBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-            downBtn:SetScript("OnClick", function()
-                if i < #list then
-                    list[i], list[i + 1] = list[i + 1], list[i]
-                    SaveList()
-                    BuildRows()
-                end
-            end)
+                Widgets:EnableRowDrag(grip, dragParams)
+            end
 
             -- Botón visibilidad en el menú flotante (ojo), antes del eliminar
             local visBtn = RD.ui.widgets:CreateVisibilityToggle(row, item, SaveList, function() BuildRows() end)
@@ -618,12 +459,11 @@ function Widgets:CreateList(parent, field, onChange)
             rmTex:SetTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
             removeBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
 
-            -- Posiciona el bloque de acciones a la derecha: [icono][bajar][subir][ojo][quitar]
+            -- Posiciona el bloque de acciones a la derecha: [agarre][icono][ojo][quitar]
             removeBtn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
             visBtn:SetPoint("RIGHT", removeBtn, "LEFT", -2, 0)
-            upBtn:SetPoint("RIGHT", visBtn, "LEFT", -2, 0)
-            downBtn:SetPoint("RIGHT", upBtn, "LEFT", -2, 0)
-            iconBtn:SetPoint("RIGHT", downBtn, "LEFT", -2, 0)
+            iconBtn:SetPoint("RIGHT", visBtn, "LEFT", -2, 0)
+            if grip then grip:SetPoint("RIGHT", iconBtn, "LEFT", -2, 0) end
             removeBtn:SetScript("OnClick", function()
                 local dialogs = RD.ui and RD.ui.dialogs
                 local function DoRemove()
@@ -645,12 +485,13 @@ function Widgets:CreateList(parent, field, onChange)
             itemRows[#itemRows + 1] = row
         end
 
-        -- Lista vacía: indicación para empezar a crear elementos
+        -- Lista vacía: indicación para empezar a crear elementos (anclada al top
+        -- del scroll, igual que las filas; la franja de creación está fuera).
         if #list == 0 then
             local empty = RD.UIUtils and RD.UIUtils.CreateEmptyList
-                and RD.UIUtils.CreateEmptyList(child, childW, "Lista vacía: pulsa 'Añadir' para crear el primer elemento.", -(rowH + gap))
+                and RD.UIUtils.CreateEmptyList(child, childW, "Lista vacía: pulsa 'Añadir' para crear el primer elemento.", 0)
             if empty then itemRows[#itemRows + 1] = empty end
-            totalH = rowH + gap + 20
+            totalH = 20
         end
 
         -- Navegación con Tab entre los campos de la lista: la caja de añadir y el
@@ -668,24 +509,26 @@ function Widgets:CreateList(parent, field, onChange)
         if scroll.SetVerticalScroll then scroll:SetVerticalScroll(0) end
         -- Viewport dinámico: se ajusta al contenido real (compacto si la lista
         -- está vacía), con tope en field.height. Así todas las pestañas de lista
-        -- siguen la misma regla que Bandas.
+        -- siguen la misma regla que Bandas. La altura total incluye la franja de
+        -- creación fija (ADD_H + GAP_H) que vive fuera del scroll.
         local viewH = math.max(1, math.min(height, math.max(1, totalH)))
         scroll:SetHeight(viewH)
-        if parent.SetHeight then parent:SetHeight(viewH) end
+        if parent.SetHeight then parent:SetHeight(ADD_H + GAP_H + PRIV_H + GAP_H + viewH) end
+
+        -- Interactividad de las filas dentro del viewport: inactiva el ratón de
+        -- solo las filas que quedan fuera de rango para que no reciban clics
+        -- "a través" de los campos que haya debajo de la lista (p.ej. los
+        -- anuncios). Las filas se mantienen VISIBLES (no se ocultan: en 3.3.5a
+        -- Hide congelaría su layout y no reaparecerían al scrollear). La franja
+        -- de creación (addBar) queda siempre visible y nunca se inactiva.
+        if Widgets.ApplyScrollVisibility then
+            Widgets:ApplyScrollVisibility(scroll, itemRows)
+        end
     end
 
     BuildRows()
 
     return scroll
-end
-
--- Helpers compartidos con otros archivos de listas (CreateContentList)
-Widgets.CreateScrollFrame = CreateScrollFrame
-Widgets.OpenIconPicker = OpenIconPicker
-
--- Hook público para precargar la lista de iconos en PLAYER_LOGIN (sin C_Timer)
-Widgets.CollectIcons = function()
-    return BuildFullIconList()
 end
 
 return Widgets

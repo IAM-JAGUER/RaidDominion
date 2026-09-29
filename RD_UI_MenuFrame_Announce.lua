@@ -2,14 +2,15 @@
     RD_UI_MenuFrame_Announce.lua
     PROPÓSITO: Anuncios y asignaciones del menú flotante (separados de
               RD_UI_MenuFrame.lua para cumplir el límite de ~700 líneas):
-              ToggleAssignment, OpenBandManager, AnnounceBand y
-              AnnounceListItem. Se adjuntan como métodos a la tabla
-              RD.ui.menuFrame (definida en RD_UI_MenuFrame.lua).
+              ToggleAssignment, OpenBandManager, AnnounceBand,
+              AnnounceListItem y AnnounceAssign. Se adjuntan como métodos a la
+              tabla RD.ui.menuFrame (definida en RD_UI_MenuFrame.lua).
     API PÚBLICA:
         - RD.ui.menuFrame:ToggleAssignment(item)
         - RD.ui.menuFrame:OpenBandManager(item)
         - RD.ui.menuFrame:AnnounceBand(item)
         - RD.ui.menuFrame:AnnounceListItem(listKey, item)
+        - RD.ui.menuFrame:AnnounceAssign(item)
     EVENTOS: Ninguno directo (envía por el canal configurado vía messageManager).
 ]]
 
@@ -22,6 +23,70 @@ if not MenuFrame then
     MenuFrame = {}
     RD.ui = RD.ui or {}
     RD.ui.menuFrame = MenuFrame
+end
+
+-- Para ETIQUETAR en el menú: un nombre de banda que es un enlace dinámico
+-- (logro/ítem) no debe mostrarse con el marcado crudo |H...|h en el FontString
+-- (se vería distorsionado). LinkLabel conserva además el color |c/|r del enlace
+-- (un |c sí lo parsea el FontString), de modo que el nombre se ve limpio y con
+-- su color. El enlace original se conserva para anunciar/registrar.
+local StripMarkup = (RD.UIUtils and RD.UIUtils.StripMarkup)
+    or function(text)
+        if type(text) ~= "string" then return tostring(text or "") end
+        text = text:gsub("%|H[^|]*%|h(.-)%|h", "%1")
+        text = text:gsub("%|r", "")
+        return text
+    end
+local LinkLabel = (RD.UIUtils and RD.UIUtils.LinkLabel) or StripMarkup
+
+-- Config de presentación de anuncios por lista (announce.<lista>, editable en la
+-- pestaña de configuración correspodiente): estilo del wrapper del título
+-- ("equals" = = x = | "brackets" = [x] | "none" = sin wrapper), la palabra
+-- que va antes del elemento al anunciarlo (solo asignables; "NEED" por defecto)
+-- y la palabra del clic derecho del botón de asignación (solo asignables).
+-- Bandas, mecánicas y reglas solo usan el wrapper (no tienen asignación).
+local ANNOUNCE_DEFAULTS = {
+    wrapper = "none",
+    word = "",
+    assignWord = "",
+}
+local function GetAnnounceCfg(listKey)
+    local cfg = ANNOUNCE_DEFAULTS
+    if RD.config and RD.config.Get and listKey then
+        local saved = RD.config:Get("announce." .. listKey, nil)
+        if type(saved) == "table" then
+            cfg = {}
+            for k, v in pairs(ANNOUNCE_DEFAULTS) do
+                cfg[k] = (saved[k] ~= nil) and saved[k] or v
+            end
+        end
+    end
+    return cfg
+end
+
+-- Envuelve el nombre del elemento con el estilo de título elegido.
+-- "none" (opción "Ninguno" de la config) deja el nombre tal cual. Delega en
+-- RD.constants.WrapTitle (única fuente del wrapper del título); fallback local
+-- por robustez en tests/orden de carga.
+local function WrapName(name, wrapper)
+    if RD.constants and RD.constants.WrapTitle then
+        return RD.constants.WrapTitle(name, wrapper)
+    end
+    if type(name) ~= "string" then name = tostring(name or "") end
+    if wrapper == "none" then
+        return name
+    end
+    if wrapper == "equals" then
+        return "= " .. name .. " ="
+    end
+    return "[" .. name .. "]"
+end
+
+-- Antepone la palabra configurada al elemento (vacía → nada).
+local function WithWord(text, word)
+    word = tostring(word or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if word == "" then return text end
+    return word .. " " .. text
 end
 
 -- Mapea el nombre de un ítem de roles a la clave de rol de banda (tank/healer).
@@ -81,7 +146,7 @@ function MenuFrame:BuildPickBandDefs()
         if v.visible ~= false then
             hadVisible = true
             defs[#defs + 1] = {
-                name = v.name or ("Banda " .. i),
+                name = LinkLabel(v.name) or ("Banda " .. i),
                 icon = v.icon or "Interface\\Icons\\INV_Banner_02",
                 chooseBand = true,
                 bandIndex = i,
@@ -126,12 +191,15 @@ function MenuFrame:BuildBandsDefs(list)
             if v.visible ~= false then
                 local nPlayers = 0
                 if type(v.players) == "table" then nPlayers = #v.players end
-                -- El horario acompaña al label del botón (además del tooltip)
-                local label = v.name or ("Banda " .. i)
+                -- El label del menú muestra el nombre SIN el envoltorio de enlace
+                -- (un nombre de banda puede ser un enlace dinámico: el FontString
+                -- del ítem no parsea |H/|K y se vería crudo y distorsionado). Se
+                -- conserva el color |c/|r (el FontString sí lo parsea).
+                local label = LinkLabel(v.name) or ("Banda " .. i)
                 local schedule = (v.schedule and v.schedule ~= "") and v.schedule or nil
                 if schedule then label = label .. " · " .. schedule end
                 local isSpamming = (spamIdx == i)
-                local tooltip = string.format("GS mínimo: %d  ·  Horario: %s  ·  Jugadores: %d",
+                local tooltip = string.format("Gearscore mínimo: %d  ·  Horario: %s  ·  Jugadores: %d",
                     tonumber(v.minGS) or 0,
                     (v.schedule and v.schedule ~= "") and v.schedule or "Sin horario",
                     nPlayers)
@@ -161,7 +229,7 @@ function MenuFrame:BuildBandsDefs(list)
             defs[#defs + 1] = {
                 name = "No hay bandas registradas",
                 action = "OpenConfigBands",
-                tooltip = "Crea una banda desde la configuración (Opciones > Configuración > Bandas)",
+                tooltip = "Crea una banda desde la configuración (Configuración > Bandas)",
             }
         end
     end
@@ -181,7 +249,7 @@ function MenuFrame:BuildBandsDefs(list)
         tooltip = "Anuncia los ítems del botín del boss recién caído por la salida por defecto.",
     }
     defs[#defs + 1] = {
-        name = "Recoger items",
+        name = "Recoger ítems",
         action = "CollectLoot",
         icon = "Interface\\Icons\\INV_Misc_Coin_01",
         tooltip = "Dirige todos los ítems del botín abierto al maestro despojador.",
@@ -243,39 +311,44 @@ function MenuFrame:OpenBandManager(item)
 end
 
 -- Anuncia una banda por el canal configurado (clic en el texto del ítem).
--- Formato similar a reglas/mecánicas: "=== Nombre ===" + resumen de la banda.
+-- Formato según la config de anuncios de bandas: "= Nombre =" (wrapper y
+-- palabra configurables) + resumen de la banda.
 function MenuFrame:AnnounceBand(item)
     local mm = RD.modules and RD.modules.messageManager
     if not mm or not mm.SendMessage then return end
     local bands = RD.utils and RD.utils.bands
     local band = bands and bands:GetBand(item.bandIndex)
     if not band then return end
-    mm:SendMessage("=== " .. (band.name or item.name or "Banda") .. " ===")
+    local cfg = GetAnnounceCfg("bands")
+    mm:SendMessage(WithWord(WrapName(band.name or item.name or "Banda", cfg.wrapper), cfg.word))
     -- El horario NO se anuncia: queda en el label/tooltip del ítem del menú y en
     -- la ventana de banda (bandInfo), como está actualmente.
-    mm:SendMessage(string.format("GS mínimo: %d",
+    mm:SendMessage(string.format("Gearscore mínimo: %d",
         tonumber(band.minGS) or 0))
 end
 
 -- Anuncia un elemento de lista dinámica por el canal configurado.
--- roles/abilities/buffs/auras (asignables): "<asignado> [<ítem>]" si ya hay
--- asignación; si no, "<objetivo> [<ítem>]" o "NEED [<ítem>]". NO crea
+-- roles/abilities/buffs/auras (asignables): "<asignado> <wrappeado>" si ya hay
+-- asignación; si no, "<palabra> <wrappeado>" (la palabra configurable, por
+-- defecto "NEED"; NO usa el objetivo seleccionado). El estilo del wrapper
+-- (= x = / [x]) y la palabra se configuran en la pestaña de cada lista. NO crea
 -- asignaciones (eso es del botón-icono, como el addon base).
--- rules/mechanics: envía el contenido (troceado si supera 250 bytes).
+-- rules/mechanics: envía el título con su wrapper + contenido (troceado si supera 250 bytes).
 function MenuFrame:AnnounceListItem(listKey, item)
     local mm = RD.modules and RD.modules.messageManager
     if not mm then return end
 
+    local cfg = GetAnnounceCfg(listKey)
+
     if listKey == "mechanics" or listKey == "rules" then
-        -- Como el addon base: primero el título con formato "=== Título ==="
-        -- y después el contenido (troceado si supera 250 bytes).
+        -- Título con su wrapper y palabra configurable; después el contenido.
         local title = item.title or item.name or ""
         local content = item.content or ""
         if content == "" then
             content = item.name or ""
         end
         if title ~= "" then
-            mm:SendMessage("=== " .. title .. " ===")
+            mm:SendMessage(WithWord(WrapName(title, cfg.wrapper), cfg.word))
         end
         if content ~= "" and content ~= title then
             mm:SendMessage(content)
@@ -284,16 +357,29 @@ function MenuFrame:AnnounceListItem(listKey, item)
     end
 
     local itemName = item.name or item.title or ""
+    if itemName == "" then return end
+    local wrapped = WrapName(itemName, cfg.wrapper)
     if item.assigned then
-        mm:SendMessage(item.assigned .. " [" .. itemName .. "]")
+        mm:SendMessage(item.assigned .. " " .. wrapped)
         return
     end
-    local targetName = UnitExists("target") and UnitName("target") or nil
-    if targetName then
-        mm:SendMessage(targetName .. " [" .. itemName .. "]")
-    else
-        mm:SendMessage("NEED [" .. itemName .. "]")
-    end
+    -- Sin asignación: la palabra fija configurada va antes del elemento (por
+    -- defecto "NEED"), independientemente de si hay un objetivo seleccionado.
+    local word = cfg.word
+    if not word or word == "" then word = "NEED" end
+    mm:SendMessage(word .. " " .. wrapped)
+end
+
+-- Anuncia un elemento con la palabra del clic derecho del botón de asignación
+-- (announce.<lista>.assignWord; vacía = solo el elemento con su wrapper).
+function MenuFrame:AnnounceAssign(item)
+    local listKey = self.currentSource and self.currentSource.key
+    local mm = RD.modules and RD.modules.messageManager
+    if not listKey or not mm or not mm.SendMessage then return end
+    local itemName = item.name or item.title or ""
+    if itemName == "" then return end
+    local cfg = GetAnnounceCfg(listKey)
+    mm:SendMessage(WithWord(WrapName(itemName, cfg.wrapper), cfg.assignWord))
 end
 -- Registro explícito e idempotente: la tabla debe ser SIEMPRE la misma que la del
 -- archivo principal, por si este archivo se cargó antes que aquél.

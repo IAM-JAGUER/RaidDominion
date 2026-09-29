@@ -140,8 +140,9 @@ function Win:RebuildPreview()
     local canStart = m.CanStart and m:CanStart() or false
     if self.lengthText then
         self.lengthText:SetText(tostring(len) .. "/" .. MAX_LEN)
-        -- Verde si es enviable (splitter en canales normales; la Posada exige
-        -- ≤255), rojo si no hay forma de enviarlo.
+        -- Verde si es enviable (splitter en canales normales; los canales de
+        -- línea única —Posada e índices 1-9— exigen ≤255), rojo si no hay forma
+        -- de enviarlo.
         if canStart then
             self.lengthText:SetTextColor(0, 1, 0)
         else
@@ -183,9 +184,9 @@ function Win:SetChannelTab(tab)
 end
 
 -- Envía la regla seleccionada una sola vez al canal dado (salida puntual).
--- Dos renglones (título y contenido) en canales normales; la Posada (INN)
--- recibe un único renglón ≤255 caracteres (permite un mensaje cada 10 s).
--- Paridad con el spammer de banda (RD_UI_SpammerWindow:SendToChannel).
+-- Dos renglones (título y contenido) en canales normales; la Posada (INN) y los
+-- índices 1-9 reciben un único renglón ≤255 caracteres (permiten un mensaje
+-- cada 10 s). Paridad con el spammer de banda (RD_UI_SpammerWindow:SendToChannel).
 function Win:SendToChannel(channelKey)
     if not channelKey then return end
     CommitSettings()
@@ -197,7 +198,7 @@ function Win:SendToChannel(channelKey)
     end
     local skipped = m.SendItemToChannel and m:SendItemToChannel(item, channelKey)
     if skipped then
-        Log("|cffff8000[RaidDominion]|r La regla supera 255 caracteres: la Posada solo permite un mensaje cada 10 s.")
+        Log("|cffff8000[RaidDominion]|r La regla supera 255 caracteres: la Posada y los índices 1-9 solo permiten un mensaje cada 10 s.")
     end
 end
 
@@ -328,9 +329,15 @@ function Win:Create()
     if self.frame then return self.frame end
 
     local frame = CreateFrame("Frame", "RaidDominionRulesSpammer", UIParent)
-    frame:SetFrameStrata("HIGH")
-    frame:SetToplevel(true)
-    frame:SetClampedToScreen(true)
+    -- Strata MEDIUM (paridad con los paneles de personaje de WoW): la ventana
+    -- se cubre/descubre con la UI del juego y pasa al frente al activarla.
+    if RD.UIUtils and RD.UIUtils.SetupWindow then
+        RD.UIUtils.SetupWindow(frame)
+    else
+        frame:SetFrameStrata("MEDIUM")
+        frame:SetToplevel(true)
+        frame:SetClampedToScreen(true)
+    end
     frame:SetSize(WIN_W, WIN_H)
     frame:EnableMouse(true)
     frame:SetMovable(true)
@@ -348,7 +355,6 @@ function Win:Create()
             })
         end
     end)
-    if RD.UIUtils and RD.UIUtils.MakeClickToTop then RD.UIUtils.MakeClickToTop(frame) end
     frame:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -382,6 +388,9 @@ function Win:Create()
     self.durationBox:SetAutoFocus(false)
     self.durationBox:SetNumeric(true)
     RD.UIUtils.StyleInput(self.durationBox)
+    if RD.UIUtils and RD.UIUtils.DisableLinkInsertion then
+        RD.UIUtils.DisableLinkInsertion(self.durationBox)
+    end
     self.durationBox:SetPoint("TOPLEFT", frame, "TOPLEFT", PAD + 80, Y.durBox)
     -- Enter/Escape liberan el foco del control (estilo KRT, como el spammer de
     -- banda): tras commitear se hace ClearFocus para poder usar los atajos del
@@ -495,7 +504,7 @@ function Win:Create()
         end
         local ok = m:Start()
         if not ok then
-            Log("|cffff0000[RaidDominion]|r No se pudo iniciar: elige una regla no vacía y al menos un canal (la Posada exige ≤255 caracteres).")
+            Log("|cffff0000[RaidDominion]|r No se pudo iniciar: elige una regla no vacía y al menos un canal (los canales de línea única —Posada y 1-9— exigen ≤255 caracteres).")
         end
         self:SetRunning(m:IsActive())
         self:RebuildPreview()
@@ -532,15 +541,34 @@ function Win:Create()
     self.timeFrame = timeFrame
 
     if RD.events and RD.events.Subscribe then
+        -- Debounceado: editar reglas dispara un Set por tecla -> CONFIG_CHANGED;
+        -- RefreshFields reconstruiría los campos al instante por cada una. El
+        -- caso selectedTitle se mantiene inmediato (solo reconstruye el preview,
+        -- sin escribir config, no produce bucle).
+        local fieldsDebouncer = RD.UIUtils and RD.UIUtils.NewDebouncer
+            and RD.UIUtils.NewDebouncer(0.15, function()
+                if Win.isShown then Win:RefreshFields() end
+            end)
         RD.events:Subscribe("CONFIG_CHANGED", function(key)
             if not Win.isShown then return end
-            if key == "rules" or (type(key) == "string" and key:find("^ui%.rulesSpammer")) then
+            if key == "rules" or (type(key) == "string" and key:find("^ui%.rulesSpammer"))
+                or (type(key) == "string" and key:find("^announce%.rules")) then
                 -- Evita bucle al guardar selectedTitle desde RefreshFields
                 if key == "ui.rulesSpammer.selectedTitle" then
                     Win:RebuildPreview()
                     return
                 end
-                Win:RefreshFields()
+                if key and key:find("^announce%.rules") then
+                    -- Cambió el estilo del título (announce.rules.wrapper):
+                    -- solo hay que refrescar la vista previa.
+                    Win:RebuildPreview()
+                    return
+                end
+                if fieldsDebouncer then
+                    fieldsDebouncer:Fire()
+                else
+                    Win:RefreshFields()
+                end
             end
         end)
     end
@@ -572,8 +600,12 @@ function Win:Open()
     end
     if not self.frame then return end
     self:RefreshFields()
-    self.frame:Show()
-    self.frame:Raise()
+    if RD.UIUtils and RD.UIUtils.ActivateWindow then
+        RD.UIUtils.ActivateWindow(self.frame)
+    else
+        self.frame:Show()
+        self.frame:Raise()
+    end
     self.isShown = true
     if self.timeFrame then self.timeFrame:Show() end
 end

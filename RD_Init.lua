@@ -9,6 +9,36 @@ local addonName, private = ...
 local RD = _G.RaidDominion or {}
 _G.RaidDominion = RD
 
+-- Compatibilidad 3.3.5a: algunos clientes no definen la constante MASTER_LOOT_THREHOLD
+-- que LootFrame.lua compara al repartir botín manualmente (selectedQuality >=
+-- MASTER_LOOT_THREHOLD). Sin ella, el menú desplegable de reparto de Blizzard
+-- revienta con "attempt to compare number with nil". Se define si falta con el
+-- valor REAL de Blizzard (4 = los épicos o mejores piden confirmación antes de
+-- entregar). El modo Auto llama a GiveMasterLoot directamente y no pasa por ese
+-- diálogo.
+if _G.MASTER_LOOT_THREHOLD == nil then
+    _G.MASTER_LOOT_THREHOLD = 4
+end
+
+-- Ignorar POR DEFECTO el diálogo nativo de Blizzard "ADDON_ACTION_FORBIDDEN" /
+-- "MACRO_ACTION_FORBIDDEN" (el cuadro "RaidDominion ha bloqueado una función de
+-- la interfaz de WoW" con botones Desactivar/Ignorar). La apertura del Auto ya
+-- NO llama a funciones protegidas (ver RD_Module_AutoLoot.lua), pero este hook
+-- queda como RED DE SEGURIDAD: si algún flujo futuro tocara una función
+-- protegida, el addon no se desactiva ni muestra la caja (equivale a pulsar
+-- "Ignorar"). El resto de popups de Blizzard y los RD_* pasan intactos.
+do
+    local origStaticPopupShow = _G.StaticPopup_Show
+    if origStaticPopupShow then
+        _G.StaticPopup_Show = function(name, ...)
+            if name == "ADDON_ACTION_FORBIDDEN" or name == "MACRO_ACTION_FORBIDDEN" then
+                return
+            end
+            return origStaticPopupShow(name, ...)
+        end
+    end
+end
+
 local isInitialized = false
 
 -- Mensaje de sistema (fallback a print si messageManager no está cargado)
@@ -30,12 +60,16 @@ local function ShowHelp()
         end
     end
     Out(" ")
-    Out("|cffff8000=== RaidDominion ===|r")
+    Out("|cffff8000= RaidDominion =|r")
     Out("|cffffff00Comandos disponibles:|r")
     Out(" ")
     Out("|cffffff00/rd|r - Muestra/oculta el menú flotante")
     Out("|cffffff00/rdc|r - Muestra/oculta la configuración")
-    Out("|cffffff00/rdh|r - Muestra esta ayuda")
+    Out("|cffffff00/rdh|r - Muestra este resumen de comandos")
+    Out("|cffffff00/rdloot|r - Abre el gestor de botín")
+    Out("|cffffff00/rdminimap|r - Muestra/oculta el botón del minimapa")
+    Out(" ")
+    Out("|cffffff00Subcomandos de /rd:|r /rd c (config), /rd loot (o botin), /rd help (o h o ?)")
     Out(" ")
     Out("|cffff8000===================|r")
     Out(" ")
@@ -75,6 +109,13 @@ local function SetupSlashCommands()
             HandleOpenLoot()
         elseif command == "help" or command == "h" or command == "?" then
             ShowHelp()
+        elseif command == "debug" then
+            -- Toggle del diagnóstico del protocolo RD_COMM (ui.commDebug).
+            local enabled = not ((RD.config and RD.config.Get and RD.config:Get("ui.commDebug", false)) or false)
+            if RD.config and RD.config.Set then
+                RD.config:Set("ui.commDebug", enabled)
+            end
+            Log(string.format("|cff33ff99[RaidDominion]|r Diagnóstico de comunicación %s.", enabled and "ACTIVADO" or "desactivado"))
         else
             Log("|cffff0000[RaidDominion]|r Comando desconocido. /rdh para ayuda.")
         end
@@ -132,6 +173,16 @@ local function InitializeAddon()
     -- Gestor de botín: registra eventos del juego (LOOT_OPENED, CHAT_MSG_SYSTEM)
     if RD.modules and RD.modules.loot and RD.modules.loot.Initialize then
         pcall(RD.modules.loot.Initialize, RD.modules.loot)
+    end
+    -- Modo Auto de botín: registra los eventos LOOT_* (apertura, cierre y
+    -- confirmación de entregas) para el barrido.
+    if RD.modules and RD.modules.autoLoot and RD.modules.autoLoot.Initialize then
+        pcall(RD.modules.autoLoot.Initialize, RD.modules.autoLoot)
+    end
+    -- Vigilancia de objetivos ("meta") de ítems y monedas (LOOT_OPENED/CLOSED,
+    -- CURRENCY_DISPLAY_UPDATE). Tras el loot y el roster de personajes.
+    if RD.modules and RD.modules.itemGoalsWatch and RD.modules.itemGoalsWatch.Initialize then
+        pcall(RD.modules.itemGoalsWatch.Initialize, RD.modules.itemGoalsWatch)
     end
     -- Ventana del gestor de botín (se construye en login)
     if RD.ui and RD.ui.lootWindow and RD.ui.lootWindow.Create then

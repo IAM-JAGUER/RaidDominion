@@ -3,8 +3,8 @@
     PROPÓSITO: Migraciones y saneos de la DB de RaidDominion (migraciones de
               dominio que la capa de persistencia (RD_Config) no debe conocer:
               canal legacy, siembra de listas, booleanos 1/0, dedup de reglas,
-              sanciones legacy, limpieza de asignaciones huérfanas y registro
-              detallado por personaje).
+              sanciones legacy, limpieza de asignaciones huérfanas, registro
+              detallado por personaje y remapeo del estilo de título de reglas).
     API PÚBLICA:
         - RD.utils.migrations:Run(db, defaults)  -- aplica todas (idempotentes)
     EVENTOS: Ninguno (lo invoca RD.config:Load antes de publicar CONFIG_LOADED).
@@ -190,6 +190,79 @@ function Migrations:Run(db, defaults)
             end
         end
         db._sanctionCausesMigrated = true
+    end
+
+    -- Migración (una sola vez): el estilo de título por defecto de las REGLAS
+    -- pasa de "none" (Ninguno) a "equals" (= Nombre =) para que el spammer de
+    -- regla muestre un título distinguible por defecto. Solo remapea el valor
+    -- legacy "none" que quedó guardado por el antiguo default; si el usuario
+    -- elige "Ninguno" después de esta migración, el flag ya está puesto y el
+    -- saneo no vuelve a tocar nada.
+    if not db._rulesWrapperEqualsMigrated then
+        if type(db.announce) == "table" and type(db.announce.rules) == "table"
+            and db.announce.rules.wrapper == "none" then
+            db.announce.rules.wrapper = "equals"
+        end
+        db._rulesWrapperEqualsMigrated = true
+    end
+
+    -- Migración (una sola vez): el modo Auto de botín dejó de tener opciones
+    -- (comportamiento fijo: recetas/materiales/dinero/basura al maestro, verde
+    -- o mejor a la banda, ítems de misión se dejan; on/off solo por el clic
+    -- izquierdo del botón "Auto"). Se purgan las claves legacy de loot.auto;
+    -- el único control que queda es ui.showAutoLootButton.
+    if not db._lootAutoSimplified then
+        local auto = db.loot and db.loot.auto
+        if type(auto) == "table" then
+            local obsolete = {
+                maxCorpses = true, persistent = true, minRarity = true,
+                minValue = true, distributeRecipes = true, corpseDelay = true,
+                itemDelay = true, verifyDelay = true, skipQuestItems = true,
+                vaciar = true, moneyToMe = true, allowInCombat = true, debug = true,
+            }
+            local hasContent = false
+            for k in pairs(auto) do
+                if obsolete[k] then
+                    auto[k] = nil
+                else
+                    hasContent = true
+                end
+            end
+            if not hasContent then
+                db.loot.auto = nil
+            end
+        end
+        db._lootAutoSimplified = true
+    end
+
+    -- Migración (una sola vez): el ítem "Jugador" del submenú RaidDominion se
+    -- reubicó a la barra inferior (ACTION_BAR) como botón con action
+    -- "ActionBarPlayer" y actionRight "ActionBarPlayerFinder", justo antes de
+    -- "Configuración". Quienes ya tenían un orden guardado en ui.actionBar.order
+    -- no incluyen el id nuevo (OrderBarItems lo añadiría al FINAL); esta
+    -- migración lo inserta delante de "ActionBarConfig" (o al final si ese id
+    -- no existiera) para que la posición por defecto sea coherente.
+    if not db._barPlayerInserted then
+        if type(db.ui) == "table" and type(db.ui.actionBar) == "table"
+            and type(db.ui.actionBar.order) == "table"
+            and #db.ui.actionBar.order > 0 then
+            local order = db.ui.actionBar.order
+            local found = false
+            for i = 1, #order do
+                if order[i] == "ActionBarPlayer" then found = true break end
+            end
+            if not found then
+                local insertAt = 0
+                for i = 1, #order do
+                    if order[i] == "ActionBarConfig" then insertAt = i break end
+                end
+                if insertAt == 0 then
+                    insertAt = #order + 1
+                end
+                table.insert(order, insertAt, "ActionBarPlayer")
+            end
+        end
+        db._barPlayerInserted = true
     end
 end
 

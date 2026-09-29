@@ -27,6 +27,12 @@ end
 
 local Log = (RD.UIUtils and RD.UIUtils.Log) or function(msg) print(msg) end
 
+-- Para el selector de banda (dropdown del título): el label mostrado no debe
+-- llevar el envoltorio |H/|K de un enlace (un FontString normal lo mostraría
+-- crudo y distorsionado), pero sí conserva el color |c/|r (que sí parsea).
+local LinkLabel = (RD.UIUtils and RD.UIUtils.LinkLabel)
+    or function(t) return tostring(t or "") end
+
 -- Sincroniza nombre / composición desde el nombre de la banda al abrir (o al
 -- renombrar). Propaga cambios de band.name → campo Nombre (ICC25H → "ICC 25H"),
 -- detecta cupo (10/25) y dificultad, y rellena roles si aún no hay personalización
@@ -58,8 +64,17 @@ function SpammerWindow:AutoComposition(bandIndex)
     -- prefijos extra ni corchetes anidados.
     local staleName = currentName:find("%[") ~= nil or currentName:find("%]") ~= nil
     if info.suggestedName and info.suggestedName ~= "" then
-        if currentName == "" or bandChanged or staleName then
-            partial.name = info.suggestedName
+        -- IMPORTANTE (anti-bucle): si el nombre actual YA es el sugerido NO se
+        -- re-sembra, aunque contenga corchetes internos (un nombre-enlace
+        -- |H...|h[Logro]|h se conserva y staleName lo ve "stale" para siempre).
+        -- Reescribir el mismo valor para siempre re-publicaba CONFIG_CHANGED
+        -- ("bands") en cadena (RD.config:Set compara por referencia y SaveBands
+        -- copia la tabla), provocando un bucle reentrante que re-renderizaba el
+        -- submenú Bandas en bucle hasta el error de pila → menú desdibujado.
+        if currentName ~= info.suggestedName then
+            if currentName == "" or bandChanged or staleName then
+                partial.name = info.suggestedName
+            end
         end
     end
     if bandName ~= "" and (bandChanged or lastSynced == "") then
@@ -145,8 +160,12 @@ function SpammerWindow:Open(bandIndex)
     self:RefreshFields()
     self.running = false
     self:SetRunning(spammer and spammer.IsActive and spammer.IsActive())
-    self.frame:Show()
-    self.frame:Raise()
+    if RD.UIUtils and RD.UIUtils.ActivateWindow then
+        RD.UIUtils.ActivateWindow(self.frame)
+    else
+        self.frame:Show()
+        self.frame:Raise()
+    end
     self.isShown = true
     -- Activa el OnUpdate del countdown mientras la ventana está visible
     if self.timeFrame then self.timeFrame:Show() end
@@ -179,7 +198,7 @@ function SpammerWindow:RefreshBandDropdown()
 
     local options = {}
     for i, b in ipairs(list) do
-        options[#options + 1] = { key = tostring(i), label = tostring(b.name or ("Banda " .. i)) }
+        options[#options + 1] = { key = tostring(i), label = LinkLabel(b.name) or ("Banda " .. i) }
     end
 
     local widgets = RD.ui and RD.ui.widgets
@@ -207,16 +226,17 @@ function SpammerWindow:RefreshBandDropdown()
 end
 
 -- Guarda el separador de partes del mensaje elegido en el dropdown y recompone
--- la preview en vivo. No debe pisar campos del usuario (prefijo/sufijo/nombre):
--- primero se commitean los editboxes pendientes, y se suprime AutoComposition
--- para que el CONFIG_CHANGED disparado por UpdateSpammer no re-siembre ni borre.
+-- la preview en vivo. El separador es UN SOLO símbolo ("" = sin separador). No
+-- debe pisar campos del usuario (prefijo/sufijo/nombre): primero se commitean
+-- los editboxes pendientes, y se suprime AutoComposition para que el
+-- CONFIG_CHANGED disparado por UpdateSpammer no re-siembre ni borre.
 function SpammerWindow:CommitSeparator(key)
     local bands = RD.utils and RD.utils.bands
     if not bands or not self.bandIndex then return end
     -- Persistir lo escrito en los campos (sin commitear aún) antes de refrescar
     if self._commitTexts then self:_commitTexts() end
     self._suppressAutoComp = true
-    bands:UpdateSpammer(self.bandIndex, { separator = key or "//" })
+    bands:UpdateSpammer(self.bandIndex, { separator = key or "" })
     self._suppressAutoComp = false
     if self.RebuildPreview then self:RebuildPreview() end
 end

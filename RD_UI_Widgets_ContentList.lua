@@ -27,6 +27,7 @@ local SetValue = Widgets.SetValue
 local CreateScrollFrame = Widgets.CreateScrollFrame
 local OpenIconPicker = Widgets.OpenIconPicker
 local EnableTabNavigation = RD.UIUtils and RD.UIUtils.EnableTabNavigation
+local Log = (RD.UIUtils and RD.UIUtils.Log) or function(msg) print(msg) end
 local DEFAULT_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 
 -- =============================================
@@ -41,9 +42,15 @@ local function EnsureContentEditor()
     if contentEditor then return contentEditor end
 
     contentEditor = CreateFrame("Frame", "RDContentEditor", UIParent)
-    contentEditor:SetFrameStrata("HIGH")
-    contentEditor:SetToplevel(true)
-    contentEditor:SetClampedToScreen(true)
+    -- Strata MEDIUM (paridad con los paneles de personaje de WoW): el editor se
+    -- cubre/descubre con la UI del juego y pasa al frente al activarlo.
+    if RD.UIUtils and RD.UIUtils.SetupWindow then
+        RD.UIUtils.SetupWindow(contentEditor)
+    else
+        contentEditor:SetFrameStrata("MEDIUM")
+        contentEditor:SetToplevel(true)
+        contentEditor:SetClampedToScreen(true)
+    end
     contentEditor:SetSize(440, 360)
     contentEditor:EnableMouse(true)
     contentEditor:SetBackdrop({
@@ -69,9 +76,6 @@ local function EnsureContentEditor()
     contentEditor:SetScript("OnDragStop", function()
         contentEditor:StopMovingOrSizing()
     end)
-    if RD.UIUtils and RD.UIUtils.MakeClickToTop then
-        RD.UIUtils.MakeClickToTop(contentEditor)
-    end
 
     -- Sin "clic fuera cierra": el editor NO se cierra al hacer clic fuera, para
     -- no perder lo escrito (se cierra con Guardar/Cancelar, el botón X o Esc).
@@ -203,6 +207,13 @@ local function EnsureContentEditor()
     contentEditor.contentBox = contentBox
     contentEditor.contentScroll = contentScroll
 
+    -- Soporte de enlaces del juego (shift-clic de ítems, hechizos/profesiones,
+    -- misiones y logros) como el cuadro de chat: el propio EditBox los acepta
+    -- sin botones extra (ver UIUtils.EnableLinkInsertion).
+    if RD.UIUtils and RD.UIUtils.EnableLinkInsertion then
+        RD.UIUtils.EnableLinkInsertion(contentBox)
+    end
+
     -- Navegación con Tab entre los campos del modal: Título → Contenido
     if EnableTabNavigation then
         EnableTabNavigation({ titleBox, contentBox })
@@ -286,8 +297,12 @@ local function OpenEditorWithState(item, isNew, state)
     if RD.UIUtils and RD.UIUtils.ClampModalToScreen then
         RD.UIUtils.ClampModalToScreen(ed, ed.contentScroll, 20)
     end
-    ed:Show()
-    ed:Raise()
+    if RD.UIUtils and RD.UIUtils.ActivateWindow then
+        RD.UIUtils.ActivateWindow(ed)
+    else
+        ed:Show()
+        ed:Raise()
+    end
     local layout = RD.ui and RD.ui.layout
     if layout and layout.EnsureVisible then layout:EnsureVisible(ed, 8) end
 end
@@ -311,9 +326,40 @@ function Widgets:CreateContentList(parent, field, onChange)
     local childW = scrollW
     local rowH = 24
     local gap = 2
+    -- Franja fija de creación (Añadir), siempre visible FUERA de la zona de scroll
+    local ADD_H = 24
+    local GAP_H = 2
+    -- Fila de privacidad de la lista ("Obtener"): vive dentro de la franja.
+    local PRIV_H = 22
 
-    local scroll, child = CreateScrollFrame(parent, scrollW, height)
+    local scroll, child = CreateScrollFrame(parent, scrollW, height, 0, -(ADD_H + GAP_H + PRIV_H + GAP_H))
     child:SetWidth(childW)
+    -- La fila de la ventana de config que aloja el editor consume el clic en su
+    -- zona vacía: en 3.3.5a el child del scroll sobresale del viewport por el
+    -- borde inferior (cola del contenido que no cabe) y ese área, al quedar
+    -- fuera del rect del scroll, dejaría caer el clic a través de él hasta la
+    -- sección siguiente (p.ej. el título/controles "Anuncios..." que quedan
+    -- debajo de la lista). Los controles (addBar, filas, viewport) son hijos y
+    -- ganan en su propia zona.
+    parent:EnableMouse(true)
+    parent:SetScript("OnMouseDown", function() end)
+    parent:SetScript("OnMouseUp", function() end)
+
+    -- Franja de creación anclada al TOP del editor: Añadir + Obtener/Reiniciar.
+    -- No forma parte del scroll (no se desplaza ni se oculta). EnableMouse:
+    -- la franja captura el clic en su zona vacía para que NO caiga a través
+    -- sobre los elementos que quedan debajo del editor.
+    local addBar = CreateFrame("Frame", nil, parent)
+    addBar:SetSize(childW, ADD_H + GAP_H + PRIV_H + GAP_H)
+    addBar:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, 0)
+    addBar:EnableMouse(true)
+    addBar:SetScript("OnMouseDown", function() end)
+    addBar:SetScript("OnMouseUp", function() end)
+    -- En 3.3.5a el ScrollFrame no recorta el ratón de su contenido: una fila que
+    -- asoma por el borde superior al hacer scroll solaparía esta franja. Elevar
+    -- su frame level sobre el scroll hace que la franja gane siempre el clic.
+    local scrollLevel = scroll and scroll.GetFrameLevel and scroll:GetFrameLevel() or 0
+    if addBar.SetFrameLevel then addBar:SetFrameLevel(scrollLevel + 5) end
 
     local itemRows = {}
     local BuildRows
@@ -328,9 +374,20 @@ function Widgets:CreateContentList(parent, field, onChange)
     end
 
     local function ClearRows()
+        -- Mismo guard de 3.3.5a que en CreateList: liberar foco antes de ocultar
+        -- para que WoW no congele la fila en pantalla como fantasma.
         for _, r in ipairs(itemRows) do
-            r:Hide()
-            r:SetParent(nil)
+            if r then
+                local ok, err = pcall(function(dead)
+                    if dead.nameBox and dead.nameBox.ClearFocus then dead.nameBox:ClearFocus() end
+                    if dead.EnableMouse then dead:EnableMouse(false) end
+                    dead:Hide()
+                    dead:SetParent(nil)
+                end, r)
+                if not ok then
+                    Log("|cffff0000[RaidDominion]|r error limpiando la lista: " .. tostring(err))
+                end
+            end
         end
         itemRows = {}
     end
@@ -341,10 +398,10 @@ function Widgets:CreateContentList(parent, field, onChange)
     end
 
     -- Botón añadir
-    local addBtn = RD.UIUtils.MakeChipButton(child, UniqueName("AAd"), 80, 22)
+    local addBtn = RD.UIUtils.MakeChipButton(addBar, UniqueName("AAd"), 80, 22)
     addBtn:SetText("Añadir")
     RD.UIUtils.AddButtonTooltip(addBtn, function() return "Añade un nuevo elemento con título, icono y contenido." end)
-    addBtn:SetPoint("TOPLEFT", child, "TOPLEFT", 0, 0)
+    addBtn:SetPoint("TOPLEFT", addBar, "TOPLEFT", 0, 1)
     addBtn:SetScript("OnClick", function()
         local newItem = { title = "", icon = "", content = "" }
         table.insert(list, newItem)
@@ -353,7 +410,7 @@ function Widgets:CreateContentList(parent, field, onChange)
 
     -- Botón obtener del líder + reiniciar (confirmaciones) vía helper compartido
     local actions = RD.ui and RD.ui.widgets and RD.ui.widgets.CreateListActionButtons
-        and RD.ui.widgets:CreateListActionButtons(child, addBtn, {
+        and RD.ui.widgets:CreateListActionButtons(addBar, addBtn, {
             listKey = key,
             label = field.label or key,
             onReset = function()
@@ -369,11 +426,26 @@ function Widgets:CreateContentList(parent, field, onChange)
             end,
         })
 
+    -- Privacidad de la lista ante "Obtener" (sobre la lista, en la franja fija).
+    if RD.ui and RD.ui.widgets and RD.ui.widgets.CreatePrivacyDropdown then
+        RD.ui.widgets:CreatePrivacyDropdown(addBar, key, { x = 6, y = -(ADD_H + GAP_H) })
+    end
+
     -- (El botón "Spamear" de la pestaña de reglas se retiró: el spammer de reglas
     -- se abre desde el menú flotante (submenú Reglas → Spamear reglas).)
 
+    -- La franja de creación (addBar) queda FUERA del scroll: no hay frames de
+    -- cabecera que ocultar por visibilidad ni que reconstruir en cada build.
+
     BuildRows = function()
         ClearRows()
+
+        -- Inválida el closure viejo de visibilidad antes de tocar el scroll
+        -- (ver RD_UI_Widgets_List.lua): SetHeight/SetVerticalScroll del scroll
+        -- disparan OnScrollRangeChanged/OnVerticalScroll que, con el closure
+        -- anterior, podrían re-mostrar filas ya limpiadas como fantasmas.
+        scroll.RDRefreshVisibility = nil
+
         -- Los ítems se distribuyen en el máximo de columnas que caben según el
         -- ancho disponible (cada celda necesita un ancho mínimo), aprovechando
         -- todo el espacio del panel.
@@ -382,14 +454,16 @@ function Widgets:CreateContentList(parent, field, onChange)
         local cols = math.max(1, math.floor((childW + colGap) / (MIN_CELL + colGap)))
         local cellW = math.max(120, math.floor((childW - (cols - 1) * colGap) / cols))
         local gridRows = math.ceil(#list / cols)
-        local totalH = rowH + gap + gridRows * (rowH + gap)
+        -- Las filas arrancan en el TOP del scroll (la franja de creación quedó
+        -- fuera, arriba); el motor de drag usa firstTop = 0 (ver más abajo).
+        local totalH = gridRows * (rowH + gap)
 
         for i, item in ipairs(list) do
             local col = (i - 1) % cols
             local r = math.floor((i - 1) / cols)
             local row = CreateFrame("Frame", nil, child)
             row:SetSize(cellW, rowH)
-            row:SetPoint("TOPLEFT", child, "TOPLEFT", col * (cellW + colGap), -(rowH + gap) - r * (rowH + gap))
+            row:SetPoint("TOPLEFT", child, "TOPLEFT", col * (cellW + colGap), -r * (rowH + gap))
             RD.UIUtils.AddRowHover(row)
 
             -- Icono del ítem a la izquierda. Sin icono (o "?" por defecto) se
@@ -410,7 +484,7 @@ function Widgets:CreateContentList(parent, field, onChange)
             titleText:SetJustifyH("LEFT")
             titleText:SetJustifyV("CENTER")
             titleText:SetPoint("LEFT", iconTex, "RIGHT", 6, 0)
-            titleText:SetPoint("RIGHT", row, "RIGHT", -88, 0)
+            titleText:SetPoint("RIGHT", row, "RIGHT", -70, 0)
             RD.UIUtils.ScaleFont(titleText, 1.25)
             row:SetScript("OnMouseDown", function(_, button)
                 if button == "LeftButton" then
@@ -418,47 +492,38 @@ function Widgets:CreateContentList(parent, field, onChange)
                 end
             end)
 
-            -- Botón subir (reordenar: una posición arriba)
-            local upBtn = CreateFrame("Button", UniqueName("IUp"), row)
-            upBtn:SetSize(20, 20)
-            local upTex = upBtn:CreateTexture(nil, "ARTWORK")
-            upTex:SetAllPoints()
-            upTex:SetTexture("Interface\\Buttons\\UI-ScrollBar-ScrollUpButton-Up")
-            upBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
-            upBtn:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetText("Subir en la lista", 1, 0.82, 0, 1, true)
-                GameTooltip:Show()
-            end)
-            upBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-            upBtn:SetScript("OnClick", function()
-                if i > 1 then
-                    list[i], list[i - 1] = list[i - 1], list[i]
-                    SaveList()
-                    BuildRows()
-                end
-            end)
-
-            -- Botón bajar (reordenar: una posición abajo)
-            local downBtn = CreateFrame("Button", UniqueName("IDn"), row)
-            downBtn:SetSize(20, 20)
-            local dnTex = downBtn:CreateTexture(nil, "ARTWORK")
-            dnTex:SetAllPoints()
-            dnTex:SetTexture("Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Up")
-            downBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
-            downBtn:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetText("Bajar en la lista", 1, 0.82, 0, 1, true)
-                GameTooltip:Show()
-            end)
-            downBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-            downBtn:SetScript("OnClick", function()
-                if i < #list then
-                    list[i], list[i + 1] = list[i + 1], list[i]
-                    SaveList()
-                    BuildRows()
-                end
-            end)
+            -- Agarre de arrastre: reordena la lista con click-drag → click-drop.
+            local grip = Widgets.CreateGrip and Widgets:CreateGrip(row)
+            if grip and Widgets.EnableRowDrag then
+                Widgets:EnableRowDrag(grip, {
+                    scroll = scroll,
+                    child = child,
+                    cols = cols,
+                    cellW = cellW,
+                    colGap = colGap,
+                    rowH = rowH,
+                    gap = gap,
+                    -- Las filas arrancan en el top del scroll (la franja de
+                    -- creación quedó fuera), así que la primera fila cae a 0.
+                    firstTop = 0,
+                    gridRows = gridRows,
+                    source = i,
+                    itemCount = function() return #list end,
+                    label = item.title,
+                    commitTarget = function(target)
+                        local src = i
+                        if target < 1 then target = 1 end
+                        if target > #list + 1 then target = #list + 1 end
+                        if target == src or target == src + 1 then return end
+                        local temp = table.remove(list, src)
+                        local idx = target
+                        if idx > src then idx = idx - 1 end
+                        table.insert(list, idx, temp)
+                        SaveList()
+                        BuildRows()
+                    end,
+                })
+            end
 
             -- Botón visibilidad en el menú flotante (ojo), antes del eliminar
             local visBtn = RD.ui.widgets:CreateVisibilityToggle(row, item, SaveList, function() BuildRows() end)
@@ -470,11 +535,10 @@ function Widgets:CreateContentList(parent, field, onChange)
             rmTex:SetAllPoints()
             rmTex:SetTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
             removeBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
-            -- Bloque de acciones a la derecha: [bajar][subir][ojo][quitar]
+            -- Bloque de acciones a la derecha: [agarre][ojo][quitar]
             removeBtn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
             visBtn:SetPoint("RIGHT", removeBtn, "LEFT", -2, 0)
-            upBtn:SetPoint("RIGHT", visBtn, "LEFT", -2, 0)
-            downBtn:SetPoint("RIGHT", upBtn, "LEFT", -2, 0)
+            if grip then grip:SetPoint("RIGHT", visBtn, "LEFT", -2, 0) end
             removeBtn:SetScript("OnClick", function()
                 local dialogs = RD.ui and RD.ui.dialogs
                 local function DoRemove()
@@ -496,21 +560,33 @@ function Widgets:CreateContentList(parent, field, onChange)
             itemRows[#itemRows + 1] = row
         end
 
-        -- Lista vacía: indicación para empezar a crear elementos
+        -- Lista vacía: indicación para empezar a crear elementos (anclada al top
+        -- del scroll, igual que las filas; la franja de creación está fuera).
         if #list == 0 then
             local empty = RD.UIUtils and RD.UIUtils.CreateEmptyList
-                and RD.UIUtils.CreateEmptyList(child, childW, "Lista vacía: pulsa 'Añadir' para crear el primer elemento.", -(rowH + gap))
+                and RD.UIUtils.CreateEmptyList(child, childW, "Lista vacía: pulsa 'Añadir' para crear el primer elemento.", 0)
             if empty then itemRows[#itemRows + 1] = empty end
-            totalH = rowH + gap + 20
+            totalH = 20
         end
 
         child:SetHeight(totalH)
         if scroll.SetVerticalScroll then scroll:SetVerticalScroll(0) end
         -- Viewport dinámico (misma regla que Bandas): compacto si está vacío,
-        -- tope en field.height si el contenido crece.
+        -- tope en field.height si el contenido crece. La altura total incluye la
+        -- franja de creación fija (ADD_H + GAP_H) que vive fuera del scroll.
         local viewH = math.max(1, math.min(height, math.max(1, totalH)))
         scroll:SetHeight(viewH)
-        if parent.SetHeight then parent:SetHeight(viewH) end
+        if parent.SetHeight then parent:SetHeight(ADD_H + GAP_H + PRIV_H + GAP_H + viewH) end
+
+        -- Interactividad de las filas dentro del viewport: inactiva el ratón de
+        -- solo las filas que quedan fuera de rango para que no reciban clics
+        -- "a través" de los campos que haya debajo de la lista (p.ej. los
+        -- anuncios). Las filas se mantienen VISIBLES (no se ocultan: en 3.3.5a
+        -- Hide congelaría su layout y no reaparecerían al scrollear). La franja
+        -- de creación (addBar) queda siempre visible y nunca se inactiva.
+        if Widgets.ApplyScrollVisibility then
+            Widgets:ApplyScrollVisibility(scroll, itemRows)
+        end
     end
 
     BuildRows()

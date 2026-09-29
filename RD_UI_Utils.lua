@@ -1,18 +1,27 @@
 --[[
     RD_UI_Utils.lua
-    PROPÓSITO: Utilidades generales de UI (frames, strings, pooling).
+    PROPÓSITO: Utilidades generales de UI (frames, pooling, escala, estilo).
+              Los helpers de texto/enlaces y tooltips viven en
+              RD_UI_Utils_Helpers.lua (misma tabla RD.UIUtils, carga previa).
     API PÚBLICA:
-        - RD.UIUtils:CleanName(name)
-        - RD.UIUtils:CapitalizeName(name)
-        - RD.UIUtils:AcquireFrame(poolName, frameType, parent, template)
-        - RD.UIUtils:ReleaseFrame(poolName, frame)
+        - RD.UIUtils:Log(msg) / SortByOrder(list) / DeepCopy(orig)
+        - RD.UIUtils:EstimateWrappedLines(str, width, fontSize) / MakeAutoResizeMultiline(editBox, scrollFrame, measureW)
+        - RD.UIUtils:UniqueName(prefix) / ApplyScale(frame) / TrackScale(frame)
+        - RD.UIUtils:MakeClickToTop(frame) / SetupWindow(frame, opts) / ActivateWindow(frame)
+        - RD.UIUtils:ClampModalToScreen(modal, flexBox, margin)
+        - RD.UIUtils:AcquireFrame(poolName, frameType, parent, template) / ReleaseFrame(poolName, frame)
+        - RD.UIUtils:CreateLabel(parent, text, template) / CreateEmptyMessage(parent, text, y) / CreateEmptyList(parent, width, text, y)
+        - RD.UIUtils:StyleInput(editBox) / MakeChipButton(parent, name, w, h) / PaintTabButton(btn, active)
+        - RD.UIUtils:EnableTabNavigation(boxes) / CreateToggleCheck(parent, text, onClick, opts) / StyleTitleDropdown(dropdown)
+    EVENTOS: Suscribe CONFIG_CHANGED("general.scale") para re-escalar en vivo
+             todas las ventanas registradas con TrackScale.
 ]]
 
 local addonName, private = ...
 local RD = _G.RaidDominion or {}
 _G.RaidDominion = RD
 
-local UIUtils = {}
+local UIUtils = assert(RD.UIUtils, "RD_UI_Utils_Helpers.lua debe cargarse antes que RD_UI_Utils.lua")
 
 -- =============================================
 -- HELPERS GENERALES (compartidos por módulos/UI)
@@ -123,30 +132,6 @@ function UIUtils.UniqueName(prefix)
     return string.format("RD%s%d", prefix or "Ux", nameCounter)
 end
 
--- =============================================
--- STRINGS
--- =============================================
-
-local cleanNameCache = {}
-
--- Limpia un nombre (elimina reino "-xxx" y espacios, minúsculas)
-function UIUtils.CleanName(name)
-    if not name then return "" end
-    if cleanNameCache[name] then return cleanNameCache[name] end
-    local clean = string.gsub(name, "%-.*", "")
-    clean = string.gsub(clean, "%s+", "")
-    local result = string.lower(clean)
-    cleanNameCache[name] = result
-    return result
-end
-
--- Capitaliza un nombre
-function UIUtils.CapitalizeName(name)
-    if not name or name == "" then return "" end
-    local clean = string.gsub(name, "%-.*", "")
-    return string.upper(string.sub(clean, 1, 1)) .. string.lower(string.sub(clean, 2))
-end
-
 -- Escala la fuente de un FontString (pct = 1.25 => +25%). Válido en 3.3.5a.
 function UIUtils.ScaleFont(fs, pct)
     if not fs or not fs.GetFont then return end
@@ -227,6 +212,55 @@ function UIUtils.ClampModalToScreen(modal, flexBox, margin)
 end
 
 -- =============================================
+-- COMPORTAMIENTO DE VENTANAS (paridad con paneles del juego)
+-- =============================================
+
+-- Strata compartida de las ventanas del addon. Los paneles de personaje de
+-- WoW (CharacterFrame y cía.) viven en MEDIUM (estrato por defecto de
+-- UIParent); las ventanas RD usan la misma capa para cubrirse/descubrirse
+-- entre sí y con la UI del juego como lo haría un panel nativo. StaticPopups
+-- (DIALOG) y GameTooltip (TOOLTIP) quedan SIEMPRE por encima.
+UIUtils.WIN_STRATA = "MEDIUM"
+
+-- Garantiza el clic → al frente de forma explícita y determinista. Un frame
+-- con SetToplevel(true) ya se sube solo al mostrarse y al recibir clic en
+-- 3.3.5a; además se registra Raise() en OnMouseDown si no existe un script
+-- previo (los frames raíz del addon no lo usan, así que no hay conflicto).
+function UIUtils.MakeClickToTop(frame)
+    if not frame then return end
+    frame:SetToplevel(true)
+    if not frame:GetScript("OnMouseDown") then
+        frame:SetScript("OnMouseDown", function(self)
+            self:Raise()
+        end)
+    end
+end
+
+-- Configura una ventana raíz del addon con el comportamiento estándar de panel
+-- de WoW: strata WIN_STRATA (o la indicada en opts.strata), toplevel
+-- (activación sube al frente), clamp a pantalla y clic → al frente. Fuente
+-- única de verdad para el setup de ventanas (AGENTS.md §6).
+function UIUtils.SetupWindow(frame, opts)
+    if not frame then return end
+    opts = opts or {}
+    frame:SetFrameStrata(opts.strata or UIUtils.WIN_STRATA)
+    frame:SetToplevel(true)
+    if frame.SetClampedToScreen then
+        frame:SetClampedToScreen(true)
+    end
+    UIUtils.MakeClickToTop(frame)
+end
+
+-- Activa una ventana: la muestra y la sube al frente de sus hermanas del mismo
+-- estrato (las demás quedan detrás sin tocarlas). Comportamiento de panel de
+-- WoW: el elemento activo pasa al frente y los inactivos quedan detrás.
+function UIUtils.ActivateWindow(frame)
+    if not frame then return end
+    frame:Show()
+    frame:Raise()
+end
+
+-- =============================================
 -- POOLING DE FRAMES
 -- =============================================
 
@@ -259,6 +293,37 @@ function UIUtils.ReleaseFrame(poolName, frame)
     frame:SetParent(nil)
     frame:ClearAllPoints()
     table.insert(framePools[key], frame)
+end
+
+-- Debouncer compartido (coalesce llamadas encadenadas): p.ej. editar un campo
+-- dispara un Set por tecla -> CONFIG_CHANGED -> refresh; con el debouncer el
+-- refresh corre una sola vez transcurrido el delay tras la última llamada.
+-- Devuelve { Fire = function, Cancel = function }. Fire reinicia el temporizador
+-- y Show() el frame; onFire SE EJECUTA aunque la ventana se haya ocultado entre
+-- medias, así que el propio onFire debe guardar con su isShown.
+function UIUtils.NewDebouncer(delay, onFire)
+    local f = CreateFrame("Frame")
+    f:Hide()
+    f.rdDelay = delay or 0.15
+    f:SetScript("OnUpdate", function(self, elapsed)
+        self.rdElapsed = (self.rdElapsed or 0) + elapsed
+        if self.rdElapsed >= self.rdDelay then
+            self:Hide()
+            self.rdElapsed = 0
+            onFire()
+        end
+    end)
+    local debouncer = {
+        Fire = function()
+            f.rdElapsed = 0
+            f:Show()
+        end,
+        Cancel = function()
+            f:Hide()
+            f.rdElapsed = 0
+        end,
+    }
+    return debouncer
 end
 
 -- Crea un label (FontString)
@@ -296,127 +361,6 @@ function UIUtils.CreateEmptyList(parent, width, text, y)
     return f
 end
 
--- Medidor de texto reutilizable: envuelve el tooltip a un ancho máximo para que
--- no se estire a casi toda la pantalla. En 3.3.5a, wrap=true de GameTooltip
--- dimensiona la caja según la línea más larga ANTES de envolver, así que se
--- mide con una fuente real y se insertan saltos de línea a mano.
-local measureFS = nil
-local function MeasureTextWidth(text)
-    if not measureFS then
-        measureFS = CreateFrame("Frame", nil, UIParent)
-        measureFS:SetSize(10, 10)
-        measureFS:Hide()
-        measureFS.fs = measureFS:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    end
-    measureFS.fs:SetText(text)
-    return measureFS.fs:GetStringWidth() or 0
-end
-
--- Envuelve palabras a un ancho máximo (px) respetando saltos de línea previos.
-local function WrapTextToWidth(text, maxW)
-    maxW = maxW or 300
-    local out = {}
-    for line in tostring(text or ""):gmatch("[^\r\n]+") do
-        if MeasureTextWidth(line) <= maxW then
-            out[#out + 1] = line
-        else
-            local current = ""
-            for w in line:gmatch("%S+") do
-                local candidate = (current == "") and w or (current .. " " .. w)
-                if MeasureTextWidth(candidate) <= maxW then
-                    current = candidate
-                else
-                    if current ~= "" then out[#out + 1] = current end
-                    current = w
-                end
-            end
-            if current ~= "" then out[#out + 1] = current end
-        end
-    end
-    return table.concat(out, "\n")
-end
-
--- Tooltip compartido con ancho acotado (no abarca toda la pantalla).
-function UIUtils.ShowTooltip(owner, text, anchor, maxW)
-    if not owner or not owner.SetPoint then return end
-    local t = tostring(text or "")
-    if t == "" then return end
-    GameTooltip:SetOwner(owner, anchor or "ANCHOR_RIGHT")
-    GameTooltip:SetText(WrapTextToWidth(t, maxW), 1, 0.82, 0)
-    GameTooltip:Show()
-end
-
--- Muestra el tooltip de ayuda de una fila si "ui.showTooltips" está activo.
-local function ShowRowTooltip(owner, getTooltip)
-    local enabled = true
-    if RD.config and RD.config.Get then
-        enabled = RD.config:Get("ui.showTooltips", true)
-    end
-    if not enabled then return end
-    local text = getTooltip and getTooltip()
-    if not text or text == "" then return end
-    UIUtils.ShowTooltip(owner, text)
-end
-
--- Hover sutil en filas interactivas (feedback de legibilidad). Opcionalmente
--- muestra el tooltip de ayuda de la fila (gated por ui.showTooltips). Los
--- controles del widget (checkbox, slider, botón, etc.) capturan el ratón, así
--- que `extraFrames` (p.ej. widget.rdHoverTargets) recibe los mismos handlers
--- para que el hover/tooltip cubra TODO el elemento.
-function UIUtils.AddRowHover(row, getTooltip, extraFrames)
-    if not row or not row.CreateTexture or row.rdRowFx then return end
-    local hl = row:CreateTexture(nil, "OVERLAY")
-    hl:SetAllPoints()
-    hl:SetTexture("Interface\\Buttons\\UI-Listbox-Highlight2")
-    hl:SetBlendMode("ADD")
-    hl:SetAlpha(0.12)
-    hl:Hide()
-    row.rdRowFx = true
-    local function Enter(self)
-        hl:Show()
-        ShowRowTooltip(self, getTooltip)
-    end
-    local function Leave()
-        hl:Hide()
-        GameTooltip:Hide()
-    end
-    row:EnableMouse(true)
-    row:SetScript("OnEnter", Enter)
-    row:SetScript("OnLeave", Leave)
-    for _, f in ipairs(extraFrames or {}) do
-        if f and f.SetScript and f ~= row then
-            f:SetScript("OnEnter", Enter)
-            f:SetScript("OnLeave", Leave)
-        end
-    end
-end
-
--- Tooltip de ayuda para BOTONES principales (p.ej. "Añadir"/"Obtener" de los
--- editores de lista), gated por ui.showTooltips.
-function UIUtils.AddButtonTooltip(button, getTooltip)
-    if not button or not button.SetScript or button.rdBtnTip then return end
-    button.rdBtnTip = true
-    button:SetScript("OnEnter", function(self)
-        -- Conserva el highlight hover del chip (MakeChipButton) si lo tiene,
-        -- ya que este OnEnter reemplaza al del chip.
-        if button.rdHl then button.rdHl:Show() end
-        ShowRowTooltip(self, getTooltip)
-    end)
-    button:SetScript("OnLeave", function()
-        if button.rdHl then button.rdHl:Hide() end
-        GameTooltip:Hide()
-    end)
-end
-
--- Hace que un frame suba al frente al hacer clic sobre su fondo, de modo que
--- entre las ventanas de RaidDominion siempre quede arriba la activa.
-function UIUtils.MakeClickToTop(frame)
-    if not frame or not frame.SetScript then return end
-    frame:SetScript("OnMouseDown", function()
-        if frame.Raise then frame:Raise() end
-    end)
-end
-
 -- ============================================================
 -- CONVENCIONES DE ESTILO (jerarquía y consistencia)
 -- Fuentes base de 3.3.5a: NormalLarge=15, Normal=12, NormalSmall=10.
@@ -432,9 +376,73 @@ local UI_STYLE = {
         tab          = { template = "GameFontNormalSmall", scale = 1.25 },  -- ~13px  · pestañas
         sectionTitle = { template = "GameFontNormalSmall", scale = 1.5 },   -- ~15px  · sección (dorado)
         fieldLabel   = { template = "GameFontNormal",      scale = 1.25 },  -- ~15px  · etiqueta de campo
-        contentText  = { template = "GameFontNormalSmall", scale = 1.25 },  -- ~13px  · cuerpo/texto
+        contentText  = { template = "GameFontNormalSmall", scale = 1.25 },  -- ~12px  · cuerpo/texto
+        hint         = { template = "GameFontNormalSmall", scale = 1.0 },   -- ~10px  · pistas/ayuda (gris)
     },
 }
+
+UIUtils.STYLE = UI_STYLE
+
+-- Contrato de métricas compartido por las ventanas/módulos (grid 4px, AGENTS §6):
+-- un único lugar para gutters, altos de control y geometría del panel inferior
+-- de las secciones de rejilla. Casi todos los valores son múltiplos de GRID;
+-- la ÚNICA excepción es ACTION_X (14px, ver su comentario).
+UIUtils.Metrics = {
+    GRID = 4,              -- cuadrícula base
+    PAD = 4,               -- gutter lateral del contenido de una sección
+    ACTION_X = 14,         -- ancla X de la fila de acción (PAD + 10px de ajuste
+                           -- óptico pedido explícitamente por el usuario). ÚNICO
+                           -- valor fuera del grid de 4px (excepción documentada
+                           -- en harness/tests/test_ui_metrics.lua).
+    INPUT_H = 24,          -- alto de EditBox (StyleInput)
+    ACTION_H = 24,         -- alto de la fila de acción (input + botones)
+    CHIP_H = 24,           -- alto de botones chip de acción (Registrar/Quitar)
+    PANEL_H = 116,         -- alto del panel inferior fijo (equip/monedas)
+    PANEL_TITLE_Y = -8,    -- ancla del título del panel (13/15px)
+    PANEL_LINE1_Y = -28,   -- ancla de la 1ª línea de info del panel
+    PANEL_LINE_PITCH = 20, -- separación vertical entre líneas del panel
+    TRACK_S = 20,          -- lado del check de seguimiento (check por moneda/objetivo)
+    TRACK_GAP = 4,         -- hueco entre el check y el texto/otro control (grid 4px)
+    ROW_PITCH = 28,        -- pitch vertical de una fila de formulario (24 + 4)
+    LIST_LINE_H = 16,      -- alto de línea de las listas con scroll (13px + aire)
+}
+
+-- Aplica la convención tipográfica de UI_STYLE a un FontString. `kind` es una
+-- clave de UI_STYLE.fonts; escala la fuente base del template (mismo mecanismo
+-- que ScaleFont, respetando el template que fija la fuente real en 3.3.5a).
+function UIUtils.ApplyFontStyle(fs, kind)
+    if not fs or not fs.GetFont then return end
+    local spec = UI_STYLE.fonts[kind] or UI_STYLE.fonts.contentText
+    if spec then UIUtils.ScaleFont(fs, spec.scale) end
+end
+
+-- Trunca `text` para que quepa en `width` con una fuente de `fontSize` px,
+-- contando CARACTERES UTF-8 (los nombres son esMX) y añadiendo "…" si corta.
+-- Heurístico (sin medir): en 3.3.5a el layout diferido puede dar 0; el ancho
+-- medio de un glifo ronda ~0.55 * fontSize.
+function UIUtils.TruncateToWidth(text, width, fontSize)
+    local s = tostring(text or "")
+    width = tonumber(width) or 0
+    if width <= 0 then return s end
+    local size = tonumber(fontSize) or 12
+    local max = math.max(1, math.floor(width / (size * 0.55)))
+    local n = #s
+    local count = 0
+    local i = 1
+    while i <= n and count < max do
+        local b = s:byte(i)
+        local len
+        if b < 0x80 then len = 1
+        elseif b < 0xE0 then len = 2
+        elseif b < 0xF0 then len = 3
+        elseif b < 0xF8 then len = 4
+        else len = 1 end
+        i = i + len
+        count = count + 1
+    end
+    if i <= n then return s:sub(1, i - 1) .. "…" end
+    return s
+end
 
 -- Aplica la convención de input: alto estándar, insets interiores y fuente 15px.
 function UIUtils.StyleInput(editBox)
@@ -526,6 +534,7 @@ function UIUtils.EnableTabNavigation(boxes)
         end)
     end
 end
+
 
 --[[
     CheckButton con label clicable (los FontString no reciben OnClick en 3.3.5a).

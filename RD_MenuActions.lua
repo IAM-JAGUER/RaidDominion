@@ -199,6 +199,18 @@ local function HandleOpenSpammerEmpty()
     sw:OpenEmpty()
 end
 
+-- Abre (o cierra) la ventana "Jugador": busca entre los jugadores de las
+-- listas del usuario (asignaciones y bandas) y él mismo, y permite añadir un
+-- jugador por nombre a una banda. Acción del submenú RaidDominion.
+local function HandleShowPlayer()
+    local pw = RD.ui and RD.ui.playerWindow
+    if not pw or not pw.Toggle then
+        Log("|cffff0000[RaidDominion]|r La ventana de jugador no está disponible.")
+        return
+    end
+    pw:Toggle()
+end
+
 -- ============================================================================
 -- Registro por barrido de datos (no hardcodear la lista de acciones)
 -- ============================================================================
@@ -225,6 +237,7 @@ function MenuActions:RegisterDefaultActions()
         CollectLoot = HandleCollectLoot,
         OpenSpammerEmpty = HandleOpenSpammerEmpty,
         RegisterPlayer = HandleRegisterPlayer,
+        ShowPlayer = HandleShowPlayer,
     }
 
     local registered = {}

@@ -12,6 +12,13 @@
         - RD.ui.widgets:CreateButton(parent, field, onClick)
         - RD.ui.widgets:CreateList(parent, field, onChange)
         - RD.ui.widgets:CreateColor(parent, field, onChange)
+    NOTA: La API completa de widgets se reparte en varios archivos que cuelgan
+          métodos del MISMO RD.ui.widgets:
+          - RD_UI_Widgets_Scroll.lua: ApplyScrollVisibility, ScheduleVisibilityRefresh,
+            SetRowMouseEnabled (visibilidad de filas en editores con scroll).
+          - RD_UI_Widgets_Dropdown.lua: DataOptions, CreateOptionsDropdown,
+            CreatePrivacyDropdown (dropdowns de opciones y privacidad de listas).
+          - RD_UI_Widgets_List.lua / _ContentList / _Bands / _Drag / _Color / _Help.
     EVENTOS: Ninguno (indirectamente dispara CONFIG_CHANGED vía RD.config:Set)
 ]]
 
@@ -167,9 +174,10 @@ function Widgets:CreateSlider(parent, field, onChange)
     valueText:SetJustifyH("RIGHT")
     valueText:SetPoint("RIGHT", parent, "RIGHT", 0, 0)
 
-    -- El slider se estira entre el label y el valor
-    slider:SetPoint("LEFT", label, "RIGHT", 8, 0)
-    slider:SetPoint("RIGHT", valueText, "LEFT", -8, 0)
+    -- El slider se estira entre el label y el valor; y=+4 centra los 32px del
+    -- widget en la fila de 24px de la ventana de config (P4: sin asomar abajo).
+    slider:SetPoint("LEFT", label, "RIGHT", 8, 4)
+    slider:SetPoint("RIGHT", valueText, "LEFT", -8, 4)
 
     -- Estado interno y flag de carga (protege contra OnValueChanged durante init)
     local currentValue = min
@@ -213,7 +221,9 @@ function Widgets:CreateDropdown(parent, field, onChange)
 
     local options = field.options or {}
     local dropDown = CreateFrame("Frame", UniqueName("DD"), parent, "UIDropDownMenuTemplate")
-    dropDown:SetPoint("RIGHT", parent, "RIGHT", 0, 0)
+    -- y=+4 centra el alto del template (~32px) en la fila de 24px de la config
+    -- (P4: sin asomar bajo la fila). El label queda arriba a la izquierda.
+    dropDown:SetPoint("RIGHT", parent, "RIGHT", 0, 4)
 
     -- Label a la izquierda
     local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -287,26 +297,117 @@ function Widgets:CreateTextbox(parent, field, onChange)
     label:SetJustifyH("LEFT")
     label:SetPoint("LEFT", parent, "LEFT", 0, 0)
 
-    -- EditBox a la derecha
+    -- EditBox que se estira entre el label y el borde derecho de la fila/celda:
+    -- así aprovecha todo el ancho (fila completa o celda del layout "row" de los
+    -- anuncios) sin hueco central ni solaparse con el label.
     local editBox = CreateFrame("EditBox", UniqueName("Ed"), parent, "InputBoxTemplate")
     editBox:SetSize(200, 24)
     editBox:SetAutoFocus(false)
     RD.UIUtils.StyleInput(editBox)
+    editBox:SetPoint("LEFT", label, "RIGHT", 8, 0)
     editBox:SetPoint("RIGHT", parent, "RIGHT", 0, 0)
 
     local initial = GetValue(field)
     if initial == nil then initial = "" end
     editBox:SetText(tostring(initial))
 
-    local function SaveValue(self)
+    local function SaveValue(self, clearFocus)
         local value = self:GetText()
         SetValue(field, value, onChange)
-        self:ClearFocus()
+        if clearFocus then self:ClearFocus() end
     end
 
-    editBox:SetScript("OnEnterPressed", SaveValue)
-    editBox:SetScript("OnEscapePressed", SaveValue)
+    -- Guardado EN VIVO: cada tecla escrita actualiza RD.config (dispara
+    -- CONFIG_CHANGED) para que el cambio afecte de inmediato al menú flotante
+    -- (p.ej. la palabra de los anuncios) sin necesidad de pulsar Intro.
+    editBox:SetScript("OnTextChanged", function(self, userInput)
+        if userInput then SaveValue(self, false) end
+    end)
+    -- Intro y ESC guardan y devuelven el foco (comportamiento clásico)
+    editBox:SetScript("OnEnterPressed", function(self) SaveValue(self, true) end)
+    editBox:SetScript("OnEscapePressed", function(self) SaveValue(self, true) end)
+
+    -- Navegación con TAB entre los campos de texto de la ventana de config: la
+    -- cadena rdTabNext/rdTabPrev la enlaza ConfigWindow:Render (ApplyTabOrder)
+    -- tras construir las filas, en el orden visual. SHIFT-TAB retrocede.
+    -- (En 3.3.5a los dropdown/checkbox no toman foco por teclado; un dropdown
+    -- abierto ya se navega con las flechas.)
+    editBox:SetScript("OnKeyDown", function(self, key)
+        if key == "TAB" then
+            if self.rdTabNext and self.rdTabNext.SetFocus then
+                self.rdTabNext:SetFocus()
+            end
+        elseif key == "SHIFT-TAB" then
+            if self.rdTabPrev and self.rdTabPrev.SetFocus then
+                self.rdTabPrev:SetFocus()
+            end
+        end
+    end)
     editBox.rdHoverTargets = { editBox }
+
+    return editBox
+end
+
+-- =============================================
+-- TEXTBOX COMPACTO (diseño en columnas)
+-- =============================================
+
+-- Variante de CreateTextbox para secciones con varios campos por fila (layout
+-- en columnas): el label va ARRIBA y el EditBox ocupa todo el ancho debajo.
+-- Así los mensajes cortos (p.ej. los temporizadores DBM) aprovechan el ancho
+-- disponible sin que label+editbox compitan por la misma línea.
+function Widgets:CreateTextboxCompact(parent, field, onChange)
+    if not parent or not field then return nil end
+
+    local cellW = parent.GetWidth and (parent:GetWidth() or 0) or 0
+    local avail = (cellW and cellW > 0) and (cellW - 4) or (LABEL_WIDTH + 60)
+
+    -- Label arriba, fuente reducida para caber en la celda
+    local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    label:SetText(field.label or "")
+    RD.UIUtils.ScaleFont(label, 0.9)
+    label:SetJustifyH("LEFT")
+    label:SetWordWrap(true)
+    label:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, 0)
+    label:SetWidth(avail)
+
+    -- EditBox debajo, a todo el ancho de la celda
+    local editBox = CreateFrame("EditBox", UniqueName("Ed"), parent, "InputBoxTemplate")
+    editBox:SetSize(avail, 22)
+    editBox:SetAutoFocus(false)
+    RD.UIUtils.StyleInput(editBox)
+    editBox:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", 0, 0)
+
+    local initial = GetValue(field)
+    if initial == nil then initial = "" end
+    editBox:SetText(tostring(initial))
+
+    local function SaveValue(self, clearFocus)
+        local value = self:GetText()
+        SetValue(field, value, onChange)
+        if clearFocus then self:ClearFocus() end
+    end
+
+    editBox:SetScript("OnTextChanged", function(self, userInput)
+        if userInput then SaveValue(self, false) end
+    end)
+    editBox:SetScript("OnEnterPressed", function(self) SaveValue(self, true) end)
+    editBox:SetScript("OnEscapePressed", function(self) SaveValue(self, true) end)
+    editBox:SetScript("OnKeyDown", function(self, key)
+        if key == "TAB" then
+            if self.rdTabNext and self.rdTabNext.SetFocus then
+                self.rdTabNext:SetFocus()
+            end
+        elseif key == "SHIFT-TAB" then
+            if self.rdTabPrev and self.rdTabPrev.SetFocus then
+                self.rdTabPrev:SetFocus()
+            end
+        end
+    end)
+    editBox.rdHoverTargets = { editBox }
+
+    -- Alto de celda fijo: label (arriba) + editbox (abajo) con aire
+    parent:SetHeight(48)
 
     return editBox
 end
@@ -425,11 +526,19 @@ function Widgets:CreateListActionButtons(parent, anchorBtn, opts)
 
     local function RequestList()
         local comm = RD.comm
-        if comm and comm.RequestList then
-            local ok = comm:RequestList(opts.listKey)
-            if not ok and RD.messageManager and RD.messageManager.SendSystemMessage then
-                RD.messageManager:SendSystemMessage("|cffff8000[RaidDominion]|r Debes estar en grupo y no ser el líder para obtener esta lista.")
+        if not (comm and comm.RequestList) then return end
+        local ok, why = comm:RequestList(opts.listKey)
+        if ok then return end
+        if RD.messageManager and RD.messageManager.SendSystemMessage then
+            local text = "|cffff8000[RaidDominion]|r "
+            if why == "leader" then
+                text = text .. "Eres el líder: esta lista ya está en tu configuración."
+            elseif why == "nofollow" then
+                text = text .. "Debes estar en un grupo o banda para pedir la lista al líder."
+            else
+                text = text .. "No se puede pedir esta lista."
             end
+            RD.messageManager:SendSystemMessage(text)
         end
     end
 
@@ -437,6 +546,15 @@ function Widgets:CreateListActionButtons(parent, anchorBtn, opts)
         local b = MakeButton("LgOb", "Obtener", opts.obtainWidth)
         RD.UIUtils.AddButtonTooltip(b, function() return "Pide esta lista al líder si estás en grupo (añade solo los elementos nuevos, sin duplicados ni pérdidas)." end)
         b:SetScript("OnClick", function()
+            -- Prechequeo ANTES del diálogo: si no se puede pedir (solo / líder /
+            -- clave inválida), se avisa con el motivo concreto y no se abre un
+            -- diálogo de confirmación imposible.
+            local comm = RD.comm
+            local why = (comm and comm.CanRequestList and comm:CanRequestList(opts.listKey)) or nil
+            if why then
+                RequestList()
+                return
+            end
             local dialogs = RD.ui and RD.ui.dialogs
             if dialogs and dialogs.ShowConfirmDialog then
                 dialogs:ShowConfirmDialog({
@@ -473,123 +591,6 @@ function Widgets:CreateListActionButtons(parent, anchorBtn, opts)
 end
 
 -- =============================================
--- DROPDOWN DE OPCIONES (rol, dual, líder, sanción)
--- =============================================
-
--- Convierte tablas de datos (BAND_ROLE/BAND_LEADER/BAND_SANCTION) en opciones
--- para CreateOptionsDropdown. Centraliza el patrón de BandsList/PlayerEditor.
-function Widgets.DataOptions(dataTable)
-    local opts = {}
-    for _, d in ipairs(dataTable or {}) do
-        opts[#opts + 1] = { key = d.key, label = d.label or d.short or d.key, color = d.color }
-    end
-    return opts
-end
-
--- Botón pequeño que muestra el valor actual y abre un menú UIDropDownMenu con
--- las opciones. Evita el botón alto del template dentro de filas de 20px.
--- opts: { options = { {key,label,color}, ... }, current, onSelect(key), emptyLabel }
--- Devuelve { button, menu, text, GetValue(), SetValue(v) }.
-function Widgets:CreateOptionsDropdown(parent, width, opts)
-    if not parent or not opts then return nil end
-    local options = opts.options or {}
-    local emptyLabel = opts.emptyLabel or "—"
-    local current = opts.current or ""
-    -- Color del texto del valor mostrado (por defecto gris claro). Permite un
-    -- acento más vivo (p.ej. dorado) para los dropdown de título de ventana.
-    local textColor = opts.textColor or { 0.6, 0.6, 0.6 }
-
-    local function LabelFor(key)
-        if key == nil or key == "" then return emptyLabel end
-        for _, o in ipairs(options) do
-            if o.key == key then return o.label end
-        end
-        return emptyLabel
-    end
-    local function ColorFor(key)
-        for _, o in ipairs(options) do
-            if o.key == key then return o.color or textColor end
-        end
-        return textColor
-    end
-
-    local btn = CreateFrame("Button", UniqueName("ODb"), parent)
-    btn:SetSize(width or 140, 20)
-    btn:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
-    local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    btn:SetFontString(text)
-    text:SetJustifyH("CENTER")
-    text:SetPoint("LEFT", btn, "LEFT", 2, 0)
-    text:SetPoint("RIGHT", btn, "RIGHT", -2, 0)
-
-    local menu = CreateFrame("Frame", UniqueName("ODm"), parent, "UIDropDownMenuTemplate")
-    menu:Hide()
-
-    local function Paint()
-        text:SetText(LabelFor(current))
-        local c = ColorFor(current)
-        text:SetTextColor(c[1], c[2], c[3])
-    end
-    Paint()
-
-    local function InitFunc()
-        -- Opción vacía ("—") opcional: se omite cuando hideEmpty=true (p.ej. en
-        -- el título de una ventana que siempre tiene un valor válido).
-        if not opts.hideEmpty then
-            local info = UIDropDownMenu_CreateInfo()
-            info.text = emptyLabel
-            info.value = ""
-            info.checked = (current == "" or current == nil)
-            info.func = function()
-                current = ""
-                Paint()
-                if opts.onSelect then opts.onSelect("") end
-            end
-            UIDropDownMenu_AddButton(info)
-        end
-        for _, o in ipairs(options) do
-            local info2 = UIDropDownMenu_CreateInfo()
-            info2.text = o.label
-            info2.value = o.key
-            info2.checked = (current == o.key)
-            if o.color then
-                info2.colorR, info2.colorG, info2.colorB = o.color[1], o.color[2], o.color[3]
-            end
-            info2.func = function()
-                current = o.key
-                Paint()
-                if opts.onSelect then opts.onSelect(o.key) end
-            end
-            UIDropDownMenu_AddButton(info2)
-        end
-    end
-
-    btn:SetScript("OnClick", function()
-        UIDropDownMenu_Initialize(menu, InitFunc)
-        UIDropDownMenu_SetAnchor(menu, 0, 0)
-        -- En 3.3.5a NO existe ToggleDropdown: se usa ToggleDropDownMenu con el
-        -- nombre del frame ancla (el botón trigger).
-        ToggleDropDownMenu(1, nil, menu, btn:GetName(), 0, 0)
-    end)
-
-    return {
-        button = btn,
-        menu = menu,
-        text = text,
-        GetValue = function() return current end,
-        SetValue = function(self, v)
-            -- Soportar llamada con `:` (dd:SetValue(x)) y con `.` (dd.SetValue(x)):
-            -- con `:`, self es la tabla y v el valor; con `.`, self es el valor.
-            if type(self) ~= "table" then
-                v = self
-            end
-            current = v or ""
-            Paint()
-        end,
-    }
-end
-
--- =============================================
 -- VISIBILIDAD EN EL MENÚ (mostrar/ocultar un elemento del submenú flotante)
 -- =============================================
 
@@ -609,9 +610,13 @@ function Widgets:CreateVisibilityToggle(parent, item, saveFn, rebuildFn)
     end
     Paint()
     btn:SetScript("OnEnter", function(self)
+        if not (RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled()) then
+            GameTooltip:Hide()
+            return
+        end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText(item.visible == false and "Mostrar en el menú" or "Ocultar del menú flotante", 1, 0.82, 0, 1, true)
-        GameTooltip:AddLine("El elemento seguirá aquí; solo se oculta/muestra en su submenú del menú flotante.", 1, 1, 1, true)
+        GameTooltip:SetText(item.visible == false and "Mostrar en el menú flotante" or "Ocultar del menú flotante", 1, 0.82, 0, 1, true)
+        GameTooltip:AddLine("El elemento se conserva en la lista; solo cambia su visibilidad en el menú flotante.", 1, 1, 1, true)
         GameTooltip:Show()
     end)
     btn:SetScript("OnLeave", function() GameTooltip:Hide() end)

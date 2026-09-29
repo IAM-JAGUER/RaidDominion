@@ -2,7 +2,7 @@
     RD_Module_Spammer.lua
     PROPÓSITO: Motor de "spameo" de reclutamiento por banda (estilo KRT). Compone
               un mensaje de reclutamiento a partir de la config de spam de una
-              banda (bands[i].spammer): nombre entre corchetes, conteos y clases
+              banda (bands[i].spammer): nombre sin corchetes envolventes, conteos y clases
               por rol, mensaje libre con placeholders, cola (X/Y) de miembros y
               límite de 255 caracteres. Lo envía en bucle cada `duration` segundos
               a los canales marcados (reusa MessageManager:SendRaw).
@@ -27,22 +27,68 @@ local Spammer = {}
 -- Límite de SendChatMessage en 3.3.5a (caracteres; se cuenta UTF-8, no bytes)
 local MAX_LEN = 255
 
--- Cuenta CARACTERES de un string sin romper multibyte (como SplitAt de MessageManager)
+-- Mensaje de sistema (avisa del porqué de una parada; fallback a print)
+local function System(msg)
+    local mm = RD.modules and RD.modules.messageManager
+    if mm and mm.SendSystemMessage then
+        mm:SendSystemMessage(msg)
+    else
+        print(msg)
+    end
+end
+
+-- Si el mensaje compuesto se pasa de largo, se avisa (antes el bucle se paraba
+-- en silencio y el usuario creía que seguía activo). Devuelve true si avisó.
+local function WarnTooLong(msg)
+    if msg ~= "" and CharCount(msg) > MAX_LEN then
+        System("|cffff8000[RaidDominion]|r El mensaje supera los " .. MAX_LEN
+            .. " caracteres; el spam de banda se ha detenido. Reduce la composición o los placeholders.")
+        return true
+    end
+    return false
+end
+
+-- Longitud en bytes de un carácter UTF-8 (fuente única: RD.UIUtils.UTF8Len),
+-- con fallback idéntico si este módulo se executa aislado en el harness.
+local UTF8Len = (RD.UIUtils and RD.UIUtils.UTF8Len)
+    or function(byte)
+        if byte >= 0xF0 then return 4
+        elseif byte >= 0xE0 then return 3
+        elseif byte >= 0xC0 then return 2 end
+        return 1
+    end
+
+-- Cuenta CARACTERES de un string sin romper multibyte. Fuente única:
+-- MessageManager:CountChars (carga previa); fallback idéntico si este módulo se
+-- ejecuta aislado en el harness.
 local function CharCount(text)
+    local mm = RD.modules and RD.modules.messageManager
+    if mm and mm.CountChars then return mm:CountChars(text) end
     local count = 0
     local byte = 1
     while byte <= #text do
         local b = string.byte(text, byte)
-        local len = 1
-        if b >= 0xF0 then len = 4
-        elseif b >= 0xE0 then len = 3
-        elseif b >= 0xC0 then len = 2
-        end
-        byte = byte + len
+        byte = byte + UTF8Len(b)
         count = count + 1
     end
     return count
 end
+
+-- Nombre "presentable" (sin marcado de enlace) para análisis de tamaño/dificultad
+-- y extracción de números (cola X/Y). Se delega en RD.UIUtils.StripMarkup (carga
+-- antes en el .toc); fallback idéntico por si el módulo se ejecuta aislado en el
+-- harness. El marcado NUNCA se retira del mensaje final, solo del análisis.
+local StripMarkup = (RD.UIUtils and RD.UIUtils.StripMarkup)
+    or function(text)
+        if type(text) ~= "string" then return tostring(text or "") end
+        text = text:gsub("%|H[^|]*%|h(.-)%|h", "%1")
+        text = text:gsub("%|K[^|]*%|k(.-)%|k", "%1")
+        text = text:gsub("%|c%x%x%x%x%x%x%x%x", "")
+        text = text:gsub("%|r", "")
+        text = text:gsub("%|k", "")
+        text = text:gsub("%|h", "")
+        return text
+    end
 
 -- Sustituye los placeholders {band} {players} {gs} {tank} {healer} {melee} {ranged}
 -- sobre el mensaje libre del spammer.
@@ -52,7 +98,9 @@ local function SubstitutePlaceholders(msg, spammer, band)
     local inRaid = GetNumRaidMembers() > 0
     local inParty = GetNumPartyMembers() > 0
     local count = (inRaid and GetNumRaidMembers()) or (inParty and (GetNumPartyMembers() + 1)) or 0
-    local maxNum = tonumber((spammer.name or ""):match("%d+"))
+    -- El cupo se detecta sobre el nombre SIN marcado de enlace: los dígitos
+    -- internos de un enlace (IDs de logro/ítem, GUIDs) no falsean el cupo.
+    local maxNum = tonumber(StripMarkup(spammer.name or ""):match("%d+"))
     playersText = "(" .. tostring(count) .. "/" .. tostring(maxNum or 0) .. ")"
     local map = {
         band = tostring(band and band.name or ""),
@@ -69,7 +117,7 @@ local function SubstitutePlaceholders(msg, spammer, band)
 end
 
 -- Compone el mensaje final a partir de una config de spam dada y la banda.
--- Replica el orden de KRT: [Nombre] // N Tank (clases) // ... // mensaje // cola.
+-- Replica el orden de KRT: Nombre // N Tank (clases) // ... // mensaje // cola.
 -- `s` puede ser la config commiteada (BuildMessage) o un override en edición
 -- (BuildMessageFrom, usado por el preview en vivo de la ventana).
 function Spammer:BuildMessageFrom(s, bandIndex)
@@ -82,63 +130,74 @@ function Spammer:BuildMessageFrom(s, bandIndex)
     local prefix = tostring(s.prefix or ""):gsub("^%s+", ""):gsub("%s+$", "")
     local suffix = tostring(s.suffix or ""):gsub("^%s+", ""):gsub("%s+$", "")
     local name = tostring(s.name or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    -- Separador de partes configurable ("" = sin separador; por defecto "//").
-    -- El separador elegido reemplaza las comas del campo Mensaje al componer.
-    local sep = tostring(s.separator)
-    if sep == nil then sep = "//" end
-    -- Separador con espaciado alrededor (" // ") para separar las partes. La
-    -- coma simple (", ") respeta su formato propio (coma + espacio).
+    -- Separador de partes configurable ("" = sin separador).
+    -- REGLA: el separador es UN SOLO símbolo y actúa como coma: pegado a la
+    -- parte anterior + un espacio después ("test/ siguiente"), sin espacios a
+    -- su alrededor. El separador reemplaza las comas del campo Mensaje.
+    local sep = tostring(s.separator or "")
     local sepGlued = ""
-    if sep == ", " then
-        sepGlued = ", "
-    elseif sep ~= "" then
-        sepGlued = " " .. sep .. " "
-    end
+    if sep ~= "" then sepGlued = sep .. " " end
     -- Si el nombre guardado trae corchetes internos (plantillas legacy tipo
-    -- "Armo [Icc 25H]"), se extrae el contenido entre corchetes: los corchetes
-    -- del mensaje solo deben envolver el nombre de la banda, sin prefijos extra.
-    local bracketContent = name:match("%[([^%]]+)%]")
-    if bracketContent then
-        name = bracketContent
-    end
-    -- Nombre entre corchetes + prefijo/sufijo editables (preview y envío).
-    -- Evita "[]" redundantes si el nombre ya viene entre corchetes.
-    local namePart = ""
-    if name ~= "" then
-        if name:sub(1, 1) == "[" and name:sub(-1) == "]" then
-            namePart = name
-        else
-            namePart = "[" .. name .. "]"
+    -- "Armo [Icc 25H]"), se extrae el contenido entre corchetes para emitir el
+    -- nombre de la banda limpio, sin corchetes que lo rodeen ni prefijos extra.
+    -- ATENCIÓN: si el nombre es un ENLACE dinámico (logro/ítem/objetivo), su
+    -- texto visible va dentro de "[...]" del propio enlace (|H...|h[Visible]|h)
+    -- y este patrón lo extraería, DESTRUYENDO el enlace. Se omite la extracción
+    -- cuando el nombre trae marcado de hiperenlace.
+    local isLinkName = name:find("|H", 1, true) ~= nil or name:find("|K", 1, true) ~= nil
+    local bracketContent = nil
+    if not isLinkName then
+        bracketContent = name:match("%[([^%]]+)%]")
+        if bracketContent then
+            name = bracketContent
         end
     end
+    -- Nombre SIN corchetes envolventes + prefijo/sufijo editables (preview y
+    -- envío). El nombre se emite tal cual (ya viene limpio de la extracción
+    -- legacy de arriba; los enlaces dinámicos se emiten TAL CUAL, sin corchetes
+    -- extra que duplicarían el texto visible del enlace).
+    local namePart = ""
+    if name ~= "" then
+        namePart = name
+    end
+
+    -- Construye el mensaje por PARTES; cada parte se une con el separador
+    -- (comportamiento de coma: símbolo + espacio). El separador también
+    -- reemplaza las comas del campo Mensaje al componer.
+    local parts = {}
+    local function AddPart(text)
+        text = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if text ~= "" then parts[#parts + 1] = text end
+    end
+
+    -- Cabeza: prefijo / nombre / sufijo unidos con espacio simple
     local headParts = {}
     if prefix ~= "" then headParts[#headParts + 1] = prefix end
     if namePart ~= "" then headParts[#headParts + 1] = namePart end
     if suffix ~= "" then headParts[#headParts + 1] = suffix end
-    if #headParts > 0 then
-        temp = temp .. table.concat(headParts, " ") .. " "
-    end
+    if #headParts > 0 then AddPart(table.concat(headParts, " ")) end
 
-    -- Roles con conteo > 0 (como KRT)
-    if tonumber(s.tank or 0) > 0 or tonumber(s.healer or 0) > 0
-        or tonumber(s.melee or 0) > 0 or tonumber(s.ranged or 0) > 0 then
-        local roles = {
-            { n = tonumber(s.tank or 0), label = "Tank", cls = s.tankClass },
-            { n = tonumber(s.healer or 0), label = "Healer", cls = s.healerClass },
-            { n = tonumber(s.melee or 0), label = "DPS Melee", cls = s.meleeClass },
-            { n = tonumber(s.ranged or 0), label = "DPS Rango", cls = s.rangedClass },
-        }
-        for _, r in ipairs(roles) do
-            if r.n and r.n > 0 then
-                temp = temp .. sepGlued .. r.n .. " " .. r.label
-                local cls = tostring(r.cls or ""):gsub("^%s+", ""):gsub("%s+$", "")
-                if cls ~= "" then
-                    temp = temp .. " (" .. cls .. ") "
-                end
-                temp = temp .. " "
+    -- Roles con conteo > 0 (como KRT). El texto de CLASES solo se incluye si el
+    -- ojo de esa fila está activo (band.spammer.<rol>ClassShow no es false):
+    -- número y rol SIEMPRE van, el ojo solo alterna las clases.
+    local roleText = ""
+    local roles = {
+        { n = tonumber(s.tank or 0),   label = "Tank",      cls = s.tankClass,   show = s.tankClassShow   ~= false },
+        { n = tonumber(s.healer or 0), label = "Healer",    cls = s.healerClass, show = s.healerClassShow ~= false },
+        { n = tonumber(s.melee or 0),  label = "DPS Melee", cls = s.meleeClass,  show = s.meleeClassShow  ~= false },
+        { n = tonumber(s.ranged or 0), label = "DPS Rango", cls = s.rangedClass, show = s.rangedClassShow ~= false },
+    }
+    for _, r in ipairs(roles) do
+        if r.n and r.n > 0 then
+            if roleText ~= "" then roleText = roleText .. " " end
+            roleText = roleText .. r.n .. " " .. r.label
+            local cls = tostring(r.cls or ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if r.show and cls ~= "" then
+                roleText = roleText .. " (" .. cls .. ")"
             end
         end
     end
+    AddPart(roleText)
 
     -- Mensaje libre con placeholders; las comas se reemplazan por el separador
     local message = tostring(s.message or "")
@@ -146,33 +205,37 @@ function Spammer:BuildMessageFrom(s, bandIndex)
         local sub = SubstitutePlaceholders(message, s, band)
         if sep ~= "" then
             sub = sub:gsub(",", sepGlued)
+            -- Colapsa separadores repetidos del propio mensaje (p.ej. "a,,b")
+            local esc = sep:gsub("([^%w])", "%%%1")
+            sub = sub:gsub("(" .. esc .. "%s*)+", sepGlued)
         else
             -- Sin separador: se retiran las comas para no dejar fragmentos sueltos
             sub = sub:gsub(",", " ")
         end
-        temp = temp .. sepGlued .. sub .. " "
+        AddPart(sub)
     end
 
-    -- Cola (X/Y) si el nombre contiene un número (como KRT)
-    local maxNum = tonumber(name:match("%d+"))
+    -- Cola (X/Y) si el nombre contiene un número (como KRT). Se analiza el nombre
+    -- SIN marcado de enlace: los dígitos internos de un enlace no falsean el cupo.
+    local maxNum = tonumber(StripMarkup(name):match("%d+"))
     if maxNum then
         local inRaid = GetNumRaidMembers() > 0
         local inParty = GetNumPartyMembers() > 0
         local count = (inRaid and GetNumRaidMembers()) or (inParty and (GetNumPartyMembers() + 1)) or 0
-        temp = temp .. sepGlued .. "(" .. count .. "/" .. maxNum .. ")"
+        AddPart("(" .. count .. "/" .. maxNum .. ")")
     end
 
-    -- Normaliza separadores múltiples, limpia espacios dobles
-    local sepPat
-    if sep == "" then
-        sepPat = "%s+"
-    else
-        -- Escapa el separador para usarlo en un patrón literal
+    -- Une las partes con el separador ("" → espacio simple entre partes)
+    local glue = " "
+    if sep ~= "" then glue = sepGlued end
+    temp = table.concat(parts, glue)
+
+    -- Normaliza espacios sobrantes y colapsa separadores consecutivos
+    if sep ~= "" then
         local esc = sep:gsub("([^%w])", "%%%1")
-        temp = temp:gsub("%s*" .. esc .. "%s*" .. esc .. "%s*", " " .. esc .. " ")
-        sepPat = "%s+"
+        temp = temp:gsub("(" .. esc .. "%s*)+", sepGlued)
     end
-    temp = temp:gsub(sepPat, " ")
+    temp = temp:gsub("%s+", " ")
     temp = temp:gsub("^%s+", ""):gsub("%s+$", "")
     return temp
 end
@@ -197,7 +260,12 @@ function Spammer:DetectRaidInfo(bandIndex)
         return { size = nil, players = nil, difficulty = nil, suggestedName = "", bandName = "" }
     end
     local bandName = tostring(band.name or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    local text = string.lower(bandName)
+    -- El análisis (tamaño/dificultad) se hace sobre el nombre SIN marcado de
+    -- enlace: si el nombre es un enlace dinámico, los números/GUIDs internos del
+    -- markup no deben falsear 10/25 ni N/H. suggestedName conserva el nombre
+    -- original (con el enlace) para que la composición automática no lo aplane.
+    local cleanName = StripMarkup(bandName)
+    local text = string.lower(cleanName)
     local compact = text:gsub("%s+", "")
 
     local size, difficulty, suggestedName
@@ -210,7 +278,7 @@ function Spammer:DetectRaidInfo(bandIndex)
         size = tonumber(sizePart)
         difficulty = diffPart
         -- Preserva mayúsculas del original sin espacios (ICC25H → base "ICC")
-        local raw = bandName:gsub("%s+", "")
+        local raw = cleanName:gsub("%s+", "")
         local rawBase = raw:match("^([%a%-%_]+)(%d%d)([HhNn])c?$")
         local prettyBase = rawBase or basePart
         if #prettyBase <= 4 then
@@ -297,6 +365,7 @@ function Spammer:SendNow()
     if not s then self:Stop() return end
     local msg = self:BuildMessage(activeIndex)
     if msg == "" or CharCount(msg) > MAX_LEN then
+        WarnTooLong(msg)
         self:Stop()
         return
     end
@@ -319,7 +388,10 @@ function Spammer:Start(bandIndex)
     if not s then return false end
     -- Validaciones (como KRT: Start deshabilitado si no aplica)
     local msg = self:BuildMessage(bandIndex)
-    if msg == "" or CharCount(msg) > MAX_LEN then return false end
+    if msg == "" or CharCount(msg) > MAX_LEN then
+        WarnTooLong(msg)
+        return false
+    end
     local hasChannel = false
     for _, checked in pairs(s.channels or {}) do
         if checked then hasChannel = true break end
@@ -328,9 +400,25 @@ function Spammer:Start(bandIndex)
 
     activeIndex = bandIndex
     nextSendAt = GetTime()          -- envío inmediato al arrancar
-    self:SendNow()
     local duration = tonumber(s.duration) or 60
     if duration < 1 then duration = 1 end
+    -- Aviso único si algún canal tiene un suelo mayor que `duration`: el
+    -- limitador global espaciará los envíos a ese canal (p.ej. la Posada y los
+    -- índices 1-9 exigen ~10 s) y el usuario debe saber por qué.
+    local mm = RD.modules and RD.modules.messageManager
+    local warnOnce = false
+    for ch, checked in pairs(s.channels or {}) do
+        if checked and mm and mm.ChannelFloor and mm:ChannelFloor(ch) > duration then
+            warnOnce = true
+            break
+        end
+    end
+    if warnOnce and mm and mm.SendSystemMessage then
+        mm:SendSystemMessage(string.format(
+            "|cffff8000[RaidDominion]|r Algunos canales de este spammer admiten un envío cada %d s (Posada e índices 1-9); el bucle se espaciará a ese ritmo aunque el intervalo configurado sea menor.",
+            math.floor(mm:ChannelFloor("INN") or 10)))
+    end
+    self:SendNow()
     nextSendAt = GetTime() + duration
 
     if loopFrame then loopFrame:Show() end
