@@ -33,8 +33,8 @@ de hermandad.
 
 ## Instalación
 
-1. Copiá la carpeta `RaidDominion/` a `World of Warcraft/Interface/AddOns/`.
-2. Asegurate de que quede como `Interface/AddOns/RaidDominion/RaidDominion.toc`.
+1. Copiá la carpeta `RaidDominion-main` a `World of Warcraft\Interface\AddOns\`.
+2. Asegurate de que quede en `\Interface\AddOns\RaidDominion-main`.
 3. Activá el addon en la lista de addons del cliente y recargá la interfaz.
 
 ## Comandos
