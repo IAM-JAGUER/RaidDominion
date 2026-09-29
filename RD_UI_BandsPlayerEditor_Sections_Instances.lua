@@ -468,7 +468,9 @@ end
 -- Líneas listas para GameTooltip (dicts {text,r,g,b}): instancias guardadas
 -- formateadas como la sección (con reloj primero, dificultad y cuenta atrás).
 -- SOLO si el check de seguimiento está marcado; si no, nil (bloque omitido).
--- El cap evita un tooltip inmanejable con decenas de entradas.
+-- El cap evita un tooltip inmanejable con decenas de entradas. El bloque ya
+-- recibe su título del llamador ("Seguimiento de instancias:"), así que aquí
+-- NO se emite cabecera propia (el contador vive en la pestaña del editor).
 local MAX_TOOLTIP_LINES = 12
 function Instances:TooltipLines()
     if not self:IsTracking() then return nil end
@@ -477,10 +479,6 @@ function Instances:TooltipLines()
 
     local pending, free = SplitEntries(entries)
     local lines = {}
-    lines[#lines + 1] = {
-        text = "|cffffd200Instancias guardadas (" .. #entries .. ")|r",
-        r = 1, g = 1, b = 1,
-    }
 
     local shown = 0
     for _, e in ipairs(pending) do

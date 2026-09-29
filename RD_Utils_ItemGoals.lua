@@ -347,10 +347,11 @@ function ItemGoals:TrackedCurrencies()
 end
 
 -- Líneas del tooltip del botón "Jugador": una por moneda seguida, en el orden
--- en vivo del cliente (dinero primero y luego sus categorías). Formato:
---   Nombre: cantidad / meta (faltan X)   · meta pendiente
---   Nombre: cantidad / meta ✓            · meta alcanzada
---   Nombre: cantidad                     · sin meta fijada
+-- en vivo del cliente (dinero primero y luego sus categorías). Cada elemento
+-- va con viñeta ("• "). Formato:
+--   • Nombre: cantidad / meta (faltan X)   · meta pendiente
+--   • Nombre: cantidad / meta ✓            · meta alcanzada
+--   • Nombre: cantidad                     · sin meta fijada
 -- Una moneda seguida que ya no exista en la lista en vivo se omite (el flag se
 -- conserva por si la moneda vuelve). Requiere RD.utils.currencies (resuelto en
 -- tiempo de llamada: los RD_Utils_* cargan después de la UI en el .toc).
@@ -374,13 +375,13 @@ function ItemGoals:TrackedCurrencyLines()
                 -- no haya marcado reached: el flag gobierna el aviso UNA vez; el
                 -- tooltip es solo presentación).
                 if goal.reached or (c.quantity or 0) >= (goal.target or 0) then
-                    lines[#lines + 1] = c.name .. ": " .. qty .. " / " .. target .. " ✓"
+                    lines[#lines + 1] = "• " .. c.name .. ": " .. qty .. " / " .. target .. " ✓"
                 else
                     local diff = cur:Amount(c, math.max(0, (goal.target or 0) - (c.quantity or 0)))
-                    lines[#lines + 1] = c.name .. ": " .. qty .. " / " .. target .. " (faltan " .. diff .. ")"
+                    lines[#lines + 1] = "• " .. c.name .. ": " .. qty .. " / " .. target .. " (faltan " .. diff .. ")"
                 end
             else
-                lines[#lines + 1] = c.name .. ": " .. qty
+                lines[#lines + 1] = "• " .. c.name .. ": " .. qty
             end
         end
     end
@@ -456,10 +457,11 @@ function ItemGoals:TrackedItems()
     return out
 end
 
--- Líneas del tooltip del botón "Jugador": una por ítem seguido. Formato:
---   Nombre  (iLvL N)        · objetivo vigente
---   Nombre  (iLvL N) ✓      · objetivo cumplido (goal.done)
---   Ítem <id>               · sin resolver (ni objetivo ni caché del cliente)
+-- Líneas del tooltip del botón "Jugador": una por ítem seguido. Cada elemento
+-- va con viñeta ("• "). Formato:
+--   • Nombre  (iLvL N)        · objetivo vigente
+--   • Nombre  (iLvL N) ✓      · objetivo cumplido (goal.done)
+--   • Ítem <id>               · sin resolver (ni objetivo ni caché del cliente)
 -- Nombre/iLvL: el objetivo registrado gana (ya persistido); si no, GetItemInfo.
 function ItemGoals:TrackedItemLines()
     local tracked = self:TrackedItems()
@@ -483,9 +485,9 @@ function ItemGoals:TrackedItemLines()
             local line = name
             if ilvl > 0 then line = line .. "  (iLvL " .. ilvl .. ")" end
             if g and g.done then line = line .. " ✓" end
-            lines[#lines + 1] = line
+            lines[#lines + 1] = "• " .. line
         else
-            lines[#lines + 1] = "Ítem " .. id
+            lines[#lines + 1] = "• Ítem " .. id
         end
     end
     return lines

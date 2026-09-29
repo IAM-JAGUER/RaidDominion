@@ -309,7 +309,7 @@ function MenuFactory:BuildMenu(definitions, opts)
                 end
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
                 if item.isBand then
-                    GameTooltip:SetText("Banda", 1, 1, 1, 1, true)
+                    GameTooltip:SetText("Bandas", 1, 1, 1, 1, true)
                     GameTooltip:AddLine("Clic: abrir el gestor de jugadores de la banda", 1, 0.82, 0, true)
                     GameTooltip:AddLine("Clic der.: anunciar la banda", 1, 0.82, 0, true)
                 else
