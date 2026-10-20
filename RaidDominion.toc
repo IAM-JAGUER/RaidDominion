@@ -1,18 +1,19 @@
 ## Interface: 30300
 ## Title: RaidDominion
 ## Notes: Facilita la gestión de la raid, la asignación de responsabilidades en la banda.
-## Author: Andres Muñoz - https://colmillo.netlify.app/
-## Version: 3.0.0
+## Author: Andres Muñoz - https://raid-dominion.netlify.app/
+## Version: 3.1.0
 ## SavedVariables: RaidDominionDB
 ## DefaultState: enabled
 ## X-Category: Raid
 ## X-License: All Rights Reserved
-## X-Website: https://colmillo.netlify.app/
+## X-Website: https://raid-dominion.netlify.app/
 ## X-Credits: Andres Muñoz
 ## X-Localizations: esMX
 
 # Core Files (Load First)
 RD_Events.lua
+RD_Data_DefaultLists.lua
 RD_Constants.lua
 RD_Config.lua
 RD_Init.lua
@@ -71,7 +72,9 @@ RD_Utils_Assignments.lua
 RD_Utils_Migrations.lua
 RD_Utils_Characters.lua
 RD_Utils_Currencies.lua
+RD_Utils_Instances.lua
 RD_Utils_ItemGoals.lua
+RD_Utils_PlayerNotes.lua
 RD_Utils_Bands.lua
 RD_Utils_Players.lua
 RD_Utils_Registry.lua

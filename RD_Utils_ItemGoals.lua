@@ -15,9 +15,10 @@
                   itemTracked     = { [itemID] = true },        -- seguimiento de objetivos (tooltip Jugador)
                   instancesTracked= true,                        -- seguimiento de instancias (check general)
               }
-              Se escribe en BLOQUE por personaje (patrón RD_Utils_Bands). Es
-              data PERSONAL del jugador: NO toca registry/characters/bands, así
-              que el contrato con el portal web (AGENTS §14) NO cambia.
+              Se escribe en BLOQUE por personaje (patrón RD_Utils_Bands). La
+              raíz itemGoals sigue siendo local; Registry exporta una proyección
+              acotada de las metas de equipo/moneda al registro del portal, sin
+              flags de seguimiento, iconos ni el resto de preferencias locales.
     API PÚBLICA:
         - RD.utils.itemGoals:GetKey()               -> "Nombre-Reino" actual (o "" sin jugador)
         - RD.utils.itemGoals:SlotLabel(slot)        -> nombre del slot (GetInventorySlotName + fallback esMX)

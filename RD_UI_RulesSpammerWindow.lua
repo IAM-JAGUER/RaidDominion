@@ -138,12 +138,13 @@ function Win:RebuildPreview()
 
     local len = (m.GetLength and m:GetLength(item)) or 0
     local canStart = m.CanStart and m:CanStart() or false
+    -- El botón se habilita con al menos un canal marcado; el color del contador
+    -- avisa aparte si la regla no puede ENTREGARSE (solo canales de línea única
+    -- —Posada e índices 1-9— y línea > 255).
+    local canDeliver = (m.CanDeliver and m:CanDeliver()) or canStart
     if self.lengthText then
         self.lengthText:SetText(tostring(len) .. "/" .. MAX_LEN)
-        -- Verde si es enviable (splitter en canales normales; los canales de
-        -- línea única —Posada e índices 1-9— exigen ≤255), rojo si no hay forma
-        -- de enviarlo.
-        if canStart then
+        if canDeliver then
             self.lengthText:SetTextColor(0, 1, 0)
         else
             self.lengthText:SetTextColor(1, 0, 0)
@@ -504,7 +505,7 @@ function Win:Create()
         end
         local ok = m:Start()
         if not ok then
-            Log("|cffff0000[RaidDominion]|r No se pudo iniciar: elige una regla no vacía y al menos un canal (los canales de línea única —Posada y 1-9— exigen ≤255 caracteres).")
+            Log("|cffff0000[RaidDominion]|r No se pudo iniciar: elige una regla no vacía y al menos un canal marcado.")
         end
         self:SetRunning(m:IsActive())
         self:RebuildPreview()

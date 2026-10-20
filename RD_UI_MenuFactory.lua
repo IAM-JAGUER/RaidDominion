@@ -9,6 +9,7 @@
         - RD.ui.menuFactory:OrderBySavedOrder(items, savedOrder, getId)
         - RD.ui.menuFactory:MoveOrderedId(order, source, target)
         - RD.ui.menuFactory:OrderBarItems(barItems)
+        - RD.ui.menuFactory:MenuBarItems()   -- fijos + dinámicos (spammers activos)
         - RD.ui.menuFactory:DefaultMenuOrder()
         - RD.ui.menuFactory:MenuOrder()
         - RD.ui.menuFactory:OrderMainDefs(defs)
@@ -96,11 +97,11 @@ function MenuFactory:OrderBarItems(barItems)
         function(it) return it.action end)
 end
 
--- Orden POR DEFECTO de los ítems del menú flotante con pestaña propia: el orden
--- del ESQUEMA de configuración ordenado por `order` (la fila superior), filtrado
--- a los ids que existen en MainFrameOptions. Así la barra superior y el menú
--- comparten el mismo orden inicial (bands, abilities, roles, buffs, auras,
--- mechanics, rules).
+-- Orden FALLBACK de los ítems del menú flotante con pestaña propia: el orden del
+-- ESQUEMA de configuración ordenado por `order` (la fila superior), filtrado a
+-- los ids que existen en MainFrameOptions. Solo se usa cuando
+-- ui.menu.itemOrder está vacío (el default de fábrica vive en DEFAULT_CONFIG y
+-- ya trae el orden de la cuenta IAMM).
 function MenuFactory:DefaultMenuOrder()
     local defs = RD.constants and RD.constants.MENU_DEFINITIONS and RD.constants.MENU_DEFINITIONS.MainFrameOptions
     local schema = RD.constants and RD.constants.CONFIG_SCHEMA
@@ -635,6 +636,18 @@ function MenuFactory:ApplyBarButtonActive(button, activeEvent)
         Apply(mod:IsActive())
     end
     RD.events:Subscribe(activeEvent, Apply)
+end
+
+-- Ítems de la barra del MENÚ FLOTANTE: los fijos (ACTION_BAR.ITEMS) seguidos de
+-- los DINÁMICOS (ACTION_BAR.DYNAMIC_ITEMS: spammers activos). La barra de la
+-- ventana de CONFIGURACIÓN no usa este helper: replica solo los fijos (cada
+-- dinámico aparece/desaparece solo y no tiene panel de ajustes ni grip).
+function MenuFactory:MenuBarItems()
+    local AB = (RD.constants and RD.constants.ACTION_BAR) or {}
+    local out = {}
+    for _, it in ipairs(AB.ITEMS or {}) do out[#out + 1] = it end
+    for _, it in ipairs(AB.DYNAMIC_ITEMS or {}) do out[#out + 1] = it end
+    return out
 end
 
 -- Reevalúa la visibilidad de los botones de una barra (barItem.enabled) y

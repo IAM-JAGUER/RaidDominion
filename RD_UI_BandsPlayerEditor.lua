@@ -6,7 +6,7 @@
               CreateIconTabStrip): una sola sección abierta a la vez, como antes
               con el acordeón, pero liberando todo el alto del cuerpo:
                 - Información  : identidad del jugador (nombre, clase y notas)
-                  + Guardar/Cancelar.
+                  + check de seguimiento de la nota (tooltips) + Guardar/Cancelar.
                 - Equipamiento : equipamiento en vivo, SOLO para uno mismo.
                 - Bandas       : pertenencias del jugador como enlaces al gestor
                   de jugadores de cada banda + control para añadirlo a otra
@@ -19,7 +19,7 @@
               opts = { bandIndex, player (nil si es nuevo), onSaved, prefill }
         - RD.ui.playerEditor:GetFrame()        -- frame del editor (o nil si no se creó)
         - RD.ui.playerEditor:SwitchTo(key)     -- cambia de sección (la usa la UI)
-    EVENTOS: Ninguno. Escribe vía RD.utils.bands (dispara CONFIG_CHANGED).
+    EVENTOS: Ninguno. Escribe vía RD.utils.bands y RD.utils.playerNotes (dispara CONFIG_CHANGED).
 ]]
 
 local addonName, private = ...
@@ -313,6 +313,38 @@ local function BuildEditor()
     -- Notas (fila 3): etiqueta propia y campo bajo ella
     MakeLabel("Notas:", -64)
 
+    -- Check de SEGUIMIENTO de la nota: al marcarlo, la nota de este personaje
+    -- aparece en los tooltips del botón "Jugador" y del minimapa (bloque "Nota
+    -- en seguimiento:"). Es una nota GLOBAL por personaje (compartida entre todas
+    -- las bandas y disponible aunque no esté en ninguna), por lo que el check se
+    -- guarda al instante (patrón del resto de checks), sin depender de Guardar.
+    local TRACK_S = InfoMetrics.TRACK_S or 20
+    local TRACK_GAP = InfoMetrics.TRACK_GAP or 4
+    local noteCheck = CreateFrame("CheckButton", UniqueName("NtTrk"), infoBody, "UICheckButtonTemplate")
+    noteCheck:SetSize(TRACK_S, TRACK_S)
+    noteCheck:SetPoint("TOPRIGHT", infoBody, "TOPRIGHT", -PAD, -64)
+    noteCheck:SetScript("OnClick", function(self)
+        local store = RD.utils and RD.utils.playerNotes
+        if store then
+            store:SetTracked(strtrim(editor.nameBox:GetText() or ""), self:GetChecked() and true or false)
+        end
+    end)
+    local noteCheckLabel = infoBody:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    noteCheckLabel:SetText("Nota en tooltips")
+    noteCheckLabel:SetJustifyH("RIGHT")
+    noteCheckLabel:SetPoint("RIGHT", noteCheck, "LEFT", -TRACK_GAP, 0)
+    if RD.UIUtils and RD.UIUtils.ApplyFontStyle then
+        RD.UIUtils.ApplyFontStyle(noteCheckLabel, "fieldLabel")
+    else
+        RD.UIUtils.ScaleFont(noteCheckLabel, 1.25)
+    end
+    if RD.UIUtils and RD.UIUtils.AddButtonTooltip then
+        RD.UIUtils.AddButtonTooltip(noteCheck, function()
+            return "Muestra la nota de este jugador en el tooltip del botón \"Jugador\" y del minimapa (bloque \"Nota en seguimiento:\"). La nota es por personaje y se comparte entre todas tus bandas."
+        end)
+    end
+    editor.noteCheck = noteCheck
+
     -- El EditBox multilínea de 3.3.5a no recorta su texto: crece con el contenido
     -- dentro de un ScrollFrame que lo recorta y scrollea (rueda del ratón/barra).
     local createScroll = RD.ui and RD.ui.widgets and RD.ui.widgets.CreateScrollFrame
@@ -358,6 +390,14 @@ local function BuildEditor()
     -- Escape libera el foco del campo de notas (Enter inserta salto de línea y
     -- mantiene el foco, como es habitual en un área de texto multilínea).
     notesBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    -- Enlaces clicables en el cuadro de nota (técnica TinyPad, 3.3.5a): clic
+    -- = ver el enlace (SetItemRef); shift-clic = enviarlo al chat (ventana
+    -- activa o se abre el campo de chat). El clic no deja el cursor dentro del
+    -- enlace. La inserción por shift-clic desde el juego ya es automática
+    -- (EnableLinkInsertion).
+    if RD.UIUtils and RD.UIUtils.EnableLinkDisplay then
+        RD.UIUtils.EnableLinkDisplay(notesBox)
+    end
     editor:SetScript("OnShow", function()
         ResizeNotesBox()
         -- Fuerza el re-render interno del EditBox multilínea (el texto se seteó
@@ -390,20 +430,34 @@ local function BuildEditor()
     saveBtn:SetScript("OnClick", function()
         local name = strtrim(editor.nameBox:GetText() or "")
         if name == "" then return end
-        local bands = RD.utils and RD.utils.bands
-        if not bands then return end
-        -- Sin banda (jugador no registrado aún): la sección "Bandas" es la vía
-        -- para añadirlo; Guardar solo edita dentro de una banda existente.
+        local notes = editor.notesBox:GetText() or ""
+
+        -- La nota es GLOBAL por personaje (fuente de verdad). El renombrado de
+        -- la clave se hace junto al de la banda (o al instante si no hay banda),
+        -- para no mover la nota si el renombrado en banda es rechazado.
+        local notesStore = RD.utils and RD.utils.playerNotes
+        local renamed = editor.player ~= nil
+            and CleanName(editor.player.name) ~= CleanName(name)
+
+        -- Sin banda (jugador no registrado aún): la nota global se guarda y se
+        -- cierra sin error (la sección "Bandas" sigue siendo la vía para darlo de
+        -- alta en una banda).
         if not editor.bandIndex then
-            if RD.messageManager and RD.messageManager.SendSystemMessage then
-                RD.messageManager:SendSystemMessage("|cffff8000[RaidDominion]|r El jugador no está en ninguna banda. Añádelo desde la sección 'Bandas'.")
+            if notesStore then
+                if renamed then notesStore:Rename(editor.player.name, name) end
+                notesStore:SetText(name, notes)
             end
+            local onSaved = editor.onSaved
+            editor:Hide()
+            if onSaved then onSaved() end
             return
         end
+        local bands = RD.utils and RD.utils.bands
+        if not bands then return end
         local data = {
             name = name,
             class = editor.class or "",
-            notes = editor.notesBox:GetText() or "",
+            notes = notes,
         }
         if editor.isNew then
             -- Comprobar el duplicado ANTES de AddPlayer (que en otros flujos
@@ -445,6 +499,13 @@ local function BuildEditor()
                     end
                 end
             end
+        end
+        -- Nota global: SOLO tras validar/actualizar la banda (así no se mueve la
+        -- nota si el renombrado en banda fue rechazado por conflicto). El espejo
+        -- en member.notes ya viaja en `data.notes`.
+        if notesStore then
+            if renamed then notesStore:Rename(editor.player.name, name) end
+            notesStore:SetText(name, notes)
         end
         local onSaved = editor.onSaved
         editor:Hide()
@@ -619,15 +680,29 @@ function PlayerEditor:OpenPlayerEditor(opts)
         local newName = resolvedName or (opts.prefill and opts.prefill.name)
         ed.baseTitle = (newName and newName ~= "") and newName or "Nuevo jugador"
         ed.nameBox:SetText(newName or "")
-        ed.notesBox:SetText("")
+        local notesStore = RD.utils and RD.utils.playerNotes
+        ed.notesBox:SetText((notesStore and notesStore:GetText(newName)) or "")
     else
         ed.baseTitle = "Jugador"
         ed.nameBox:SetText(targetPlayer.name or "")
-        ed.notesBox:SetText(targetPlayer.notes or "")
+        -- La nota es GLOBAL por personaje: se prefiere la del store; si aún no
+        -- existe (p. ej. previa a la migración), se cae a la de la banda.
+        local notesStore = RD.utils and RD.utils.playerNotes
+        local noteText = notesStore and notesStore:GetText(targetPlayer.name)
+        if noteText == nil or noteText == "" then
+            noteText = targetPlayer.notes or ""
+        end
+        ed.notesBox:SetText(noteText)
     end
 
     -- ¿El jugador a editar es uno mismo? (habilita Instancias/Monedas)
     ed.isSelf = IsSelf(ed.nameBox:GetText() or "")
+
+    -- Estado del check de seguimiento de la nota (global por personaje).
+    if ed.noteCheck then
+        local notesStore = RD.utils and RD.utils.playerNotes
+        ed.noteCheck:SetChecked((notesStore and notesStore:IsTracked(ed.nameBox:GetText() or "")) or false)
+    end
 
     -- Aplicar visibilidad de la tira (selfOnly) ANTES de SwitchTo para que la
     -- pestaña activa sea visible y la pila reflowee sin huecos.

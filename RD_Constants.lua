@@ -52,10 +52,23 @@ local function PlayerTrackedInstances()
     return {}
 end
 
+-- Líneas de seguimiento de NOTAS de jugador para el tooltip del botón "Jugador"
+-- (RD_Utils_PlayerNotes:TrackedNoteLines). Lazy igual que las anteriores. Sin
+-- `empty` declarado: la sección se OMITE cuando no hay notas en seguimiento.
+local function PlayerTrackedNotes()
+    local notes = RD.utils and RD.utils.playerNotes
+    if notes and notes.TrackedNoteLines then
+        return notes:TrackedNoteLines()
+    end
+    return {}
+end
+
+local WEBSITE = "https://raid-dominion.netlify.app/"
+
 RD.constants = {
-    VERSION = "3.0.0",
+    VERSION = "3.1.0",
     AUTHOR = "Andres Muñoz",
-    WEBSITE = "https://colmillo.netlify.app/",
+    WEBSITE = WEBSITE,
 
     -- Grid base para el sistema de alineación (ver sección 6 de AGENTS.md)
     GRID = {
@@ -300,9 +313,30 @@ RD.constants = {
                   { title = "Seguimiento de monedas:", lines = PlayerTrackedLines },
                   { title = "Seguimiento de objetos:", lines = PlayerTrackedItems },
                   { title = "Seguimiento de instancias:", lines = PlayerTrackedInstances },
+                  { title = "Nota en seguimiento:", lines = PlayerTrackedNotes },
               } },
             { name = "Configuración", icon = "Interface\\Icons\\INV_Gizmo_02", tooltip = "Clic izq.: Abrir panel de configuración", action = "ActionBarConfig",
               panelHelp = "Abre la ventana de configuración (o usa /rdc).\nLa ventana se centra la primera vez; después respeta la posición en la que la arrastres." },
+        },
+
+        -- ICONOS DINÁMICOS de la barra del MENÚ FLOTANTE (NO se replican en la
+        -- barra de la ventana de configuración, que sigue mostrando solo ITEMS).
+        -- Aparecen SOLO mientras su spammer está activo: ambos módulos publican
+        -- SPAM_STATE_CHANGED al arrancar/parar y el menú re-renderiza la barra
+        -- (UpdateBar los muestra u oculta sin dejar huecos). El clic izq. abre/
+        -- oculta la ventana del spammer que corresponde (verla/pararla sin
+        -- volver a los submenús Bandas/Reglas).
+        DYNAMIC_ITEMS = {
+            { name = "Spammer de banda", icon = "Interface\\Icons\\INV_Banner_01", tooltip = "Clic izq.: Abrir/ocultar su ventana\n(Hay un spam de banda activo)", action = "ActionBarSpamWindow",
+              enabled = function()
+                  local m = RD.modules and RD.modules.spammer
+                  return (m and m.IsActive and m:IsActive()) == true
+              end },
+            { name = "Spammer de reglas", icon = "Interface\\Icons\\INV_Scroll_03", tooltip = "Clic izq.: Abrir/ocultar su ventana\n(Hay un spam de reglas activo)", action = "ActionBarRulesSpamWindow",
+              enabled = function()
+                  local m = RD.modules and RD.modules.rulesSpammer
+                  return (m and m.IsActive and m:IsActive()) == true
+              end },
         },
     },
 
@@ -329,6 +363,12 @@ RD.constants = {
         -- Listas configuradas por el usuario. Se arrancan VACÍAS (decisión de
         -- "versión limpia": el contenido por defecto de la v2 se desactivó).
         -- "Reiniciar" en cada pestaña las restaura a este estado (vacío).
+        -- Las listas "de fábrica" (roles, habilidades, buffs, auras y reglas)
+        -- NO viven aquí: están en RD_Data_DefaultLists.lua y se
+        -- aplican en "Restablecer valores por defecto" y en la siembra de la
+        -- primera carga. Poblarlas AQUÍ (DEFAULT_CONFIG) haría que el merge de
+        -- RD_Config:Load RE-AÑADIESE en cada login las entradas que el usuario
+        -- borró (MergeTable recrea índices de array ausentes).
         roles = {}, abilities = {}, buffs = {}, auras = {}, mechanics = {}, rules = {},
     },
 
@@ -403,7 +443,7 @@ RD.constants = {
             { id = "addonOptions", name = "RaidDominion", tooltip = "Configuración del addon", submenu = "addonOptions" },
         },
         addonOptions = {
-            { name = "Registrar", action = "RegisterPlayer", icon = "Interface\\Icons\\INV_Misc_Book_09", tooltip = "Guardar un registro completo del jugador (clase, equipamiento, bandas, hermandad)" },
+            { name = "Registrar", action = "RegisterPlayer", icon = "Interface\\Icons\\INV_Misc_Book_09", tooltip = "Guardar un registro completo del jugador (clase, equipamiento, objetivos, bandas, hermandad)" },
             { name = "Configuración", action = "ToggleConfig", tooltip = "Abrir la ventana de configuración" },
             { name = "Ayuda",         action = "ShowHelp",     tooltip = "Mostrar ayuda del addon" },
             { name = "Recargar",      action = "ReloadUI",     tooltip = "Recargar la interfaz" },
@@ -424,18 +464,26 @@ RD.constants = {
                 itemsPerColumn = 9,   -- elementos por columna (las columnas se derivan: clamp(ceil(ítems/esto), 2, MAX_COLUMNS))
                 position = { point = "CENTER", relativeTo = "UIParent", relativePoint = "CENTER", x = 0, y = 0 },
                 -- Orden de los ítems del menú flotante (MainFrameOptions) que se
-                -- pueden reordenar (los que tienen pestaña propia en la config:
-                -- abilities/roles/buffs/auras/mechanics/rules/bands). Vacío =
-                -- orden de declaración. Se reordena arrastrando el grip de una
-                -- pestaña superior de la ventana de configuración.
-                itemOrder = {},
+                -- pueden reordenar (los que tienen pestaña propia en la config).
+                -- Orden de fábrica tomado de la cuenta IAMM: Habilidades, Roles,
+                -- Auras, Buffs, Bandas, Reglas y Mecánicas. Se reordena
+                -- arrastrando el grip de una pestaña superior de la ventana de
+                -- configuración. Vacío = orden del esquema (fallback técnico).
+                itemOrder = { "abilities", "roles", "auras", "buffs", "bands", "rules", "mechanics" },
             },
             actionBar = {
                 -- Orden de los iconos de la barra inferior (ACTION_BAR.ITEMS,
-                -- por `action`). Vacío = orden de declaración. Se reordena
-                -- arrastrando el grip de un icono en la barra de la ventana de
-                -- configuración y se comparte con la barra del menú flotante.
-                order = {},
+                -- por `action`). Orden de fábrica tomado de la cuenta IAMM. Se
+                -- reordena arrastrando el grip de un icono en la barra de la
+                -- ventana de configuración y se comparte con la barra del menú
+                -- flotante. Vacío = orden de declaración (fallback técnico).
+                order = {
+                    "ActionBarConfig", "ActionBarPlayer", "ActionBarAutoLoot",
+                    "ActionBarRaidMode", "ActionBarDiscord",
+                    "ActionBarWhisperAssignments", "ActionBarMarkMains",
+                    "ActionBarReadyCheck", "ActionBarPull", "ActionBarLootMode",
+                    "ActionBarNameTarget",
+                },
             },
             minimap = {
                 position = 0.75,       -- ángulo normalizado (0..1) del botón de minimapa
@@ -546,8 +594,16 @@ RD.constants = {
         -- con clave "Nombre-Reino"; cada personaje guarda:
         --   equip    = { [slot] = { name, itemID, quality, ilvl, icon, done } }
         --   currency = { [nombreMoneda] = { target, reached } }
-        -- Data personal del jugador: NO entra en el contrato con el portal (§14).
+        -- Datos originales locales; Registry exporta solo metas de equipo/moneda,
+        -- sin iconos ni preferencias de seguimiento (AGENTS.md §14).
         itemGoals = {},
+
+        -- Notas de jugador POR PERSONAJE con comportamiento GLOBAL: una nota por
+        -- personaje (clave normalizada) compartida entre todas las bandas y
+        -- disponible aunque no esté en ninguna. Cada entrada:
+        --   playerNotes["cleanname"] = { text, display, tracked }
+        -- Store local; no viaja por "Obtener" ni se exporta al portal (§14).
+        playerNotes = {},
     },
 
     -- Esquema de configuración: la ventana se renderiza a partir de esto
@@ -555,9 +611,9 @@ RD.constants = {
     CONFIG_SCHEMA = {
         { id = "general", title = "General", order = 1, icon = "Interface\\Icons\\INV_Gizmo_02", sections = {
             { id = "menu", title = "Menú", help = "Opciones de apariencia y comportamiento del menú flotante.", fields = {
-                { key = "ui.menu.showOnStart",   type = "checkbox", label = "Mostrar menú al iniciar", help = "Muestra u oculta el menú flotante al iniciar sesión." },
+                { key = "ui.menu.showOnStart",   type = "checkbox", label = "Mostrar menú flotante al iniciar", help = "Muestra u oculta el menú flotante al iniciar sesión." },
                 { key = "ui.showTooltips",       type = "checkbox", label = "Mostrar información de ayuda", help = "Activa o desactiva las ventanas de ayuda al pasar el cursor sobre los elementos de la interfaz de RaidDominion." },
-                { key = "ui.menu.itemsPerColumn", type = "slider",  label = "Elementos por columna", min = 2, max = 9, step = 1, help = "Máximo de elementos por columna. Las columnas se calculan solas: cuantos más elementos por columna, menos columnas (y más alto el menú)." },
+                { key = "ui.menu.itemsPerColumn", type = "slider",  label = "Elementos por columna", min = 2, max = 9, step = 1, help = "Máximo de elementos por columna." },
                 { key = "general.scale",         type = "slider",   label = "Escala de la interfaz", min = 0.7, max = 1.5, step = 0.05, help = "Escala global de la interfaz de RaidDominion." },
             }},
             { id = "chat", title = "Chat", help = "Canal usado para anunciar mensajes.", fields = {
@@ -575,7 +631,7 @@ RD.constants = {
             }},
             { id = "reset", title = "", fields = {
                 { key = "actions", type = "buttons", buttons = {
-                    { key = "reload", label = "Recargar UI", action = "ReloadUI", help = "Recarga la interfaz para aplicar cambios que requieren reinicio." },
+                    { key = "reload", label = "Recargar UI", action = "ReloadUI", help = "Recarga la interfaz." },
                     { key = "reset", label = "Restablecer valores por defecto", action = "ResetConfig", help = "Borra toda la configuración de RaidDominion y la vuelve a los valores por defecto.", confirmText = "¿Restablecer TODA la configuración de RaidDominion? Se perderán tus opciones, bandas, registro (portal), personajes y metas de ítems y monedas.", confirmAccept = "Restablecer" },
                 }},
             }},
@@ -661,18 +717,18 @@ RD.constants = {
         { id = "help", title = "Ayuda", order = 100, icon = "Interface\\Icons\\INV_Misc_Book_09", compact = true, sections = {
             { id = "general", title = "Guía de RaidDominion", fields = {
                 { key = "helpAccordion", type = "helpAccordion", entries = {
-                    { title = "Acerca de", content = "RaidDominion v3.0.0 es un gestor de banda para World of Warcraft 3.3.5a (WotLK, esMX).\nOrganiza roles, habilidades, buffs, auras, mecánicas y reglas, y gestiona bandas, jugadores y asistencia. Incluye menú flotante, gestor de botín, spammers, temporizador DBM y una barra de acciones de raid." },
-                    { title = "Primeros pasos y comandos", content = "Al entrar verás el menú flotante (si 'Mostrar menú al iniciar' está activo). Clic izquierdo navega o ejecuta; clic derecho vuelve al menú anterior; arrastra el menú para moverlo.\nComandos:\n/rd - muestra/oculta el menú flotante\n/rdc - abre/cierra la configuración\n/rdh - muestra el resumen de comandos\n/rdloot - abre el gestor de botín\n/rdminimap - muestra/oculta el botón del minimapa\nSubcomandos de /rd: c (config), loot (o botin), help (o h o ?)" },
+                    { title = "Acerca de", content = "RaidDominion v3.1.0 es un gestor de banda para World of Warcraft 3.3.5a (WotLK, esMX).\nOrganiza roles, habilidades, buffs, auras, mecánicas y reglas, y gestiona bandas, jugadores y asistencia. Incluye menú flotante, gestor de botín, spammers, temporizador DBM y una barra de acciones de raid." },
+                    { title = "Primeros pasos y comandos", content = "Al entrar verás el menú flotante (si 'Mostrar menú flotante al iniciar' está activo). Clic izquierdo navega o ejecuta; clic derecho vuelve al menú anterior; arrastra el menú para moverlo.\nComandos:\n/rd - muestra/oculta el menú flotante\n/rdc - abre/cierra la configuración\n/rdh - muestra el resumen de comandos\n/rdloot - abre el gestor de botín\n/rdminimap - muestra/oculta el botón del minimapa\nSubcomandos de /rd: c (config), loot (o botin), help (o h o ?)" },
                     { title = "Menú flotante", content = "El menú agrupa: Roles, Habilidades, Buffs, Auras, Mecánicas, Reglas, Bandas y RaidDominion.\nLos ítems asignables: selecciona un objetivo y pulsa el icono del ítem para asignárselo (o desasignarlo); el clic en el texto lo anuncia por el canal configurado.\nLa barra inferior reúne las acciones de raid (ver 'Barra de acciones y temporizador DBM')." },
                     { title = "Configuración", content = "Ábrela con /rdc o desde el menú flotante / la barra de acciones.\nPestañas: General, Bandas, Habilidades, Roles, Buffs, Auras, Mecánicas, Reglas y Ayuda.\nLa barra inferior replica las acciones de raid: pulsa un icono para ver los AJUSTES de ese botón (no ejecuta la acción; para ejecutarla usa la barra del menú flotante). Arrastra el agarre para reordenarla (afecta también al menú flotante).\nEl botón 'Restablecer valores por defecto' (tab General) borra toda la configuración Y tus datos: bandas, registro, personajes y metas." },
                     { title = "Listas asignables y de contenido", content = "Roles, habilidades, buffs y auras son listas asignables; mecánicas y reglas, listas de contenido (título, icono y texto).\nSe editan en su pestaña: añade o quita ítems, elige icono y usa el botón-ojo para decidir si aparecen en el menú.\n'Obtener' pide la lista al líder; 'Reiniciar' la vacía.\nAl pulsar un ítem de contenido en el menú, su texto se envía al canal configurado (se trocea solo si es largo)." },
                     { title = "Bandas y jugadores", content = "Crea, edita o elimina bandas en Configuración > Bandas (nombre, gearscore mínimo y horario).\nDesde el menú > Bandas, el clic en el texto anuncia la banda y el clic en el icono abre su gestor de jugadores: rol (Tanque, Healer, Rango o Melee), dual, líder (No/Sí/Ayudante), asistencia (+/-) y sanción.\nCada jugador tiene botones para invitarlo y susurrarle una plantilla de invitación con los datos de la banda." },
                     { title = "Gestor de botín y modo Auto", content = "Gestor de botín (/rdloot o menú > Bandas > Gestor de botín): arrastra un ítem de la bolsa o haz clic con uno en el cursor. Tira dados (Main/Dual/Enchant) con límite de tiempo (campo 'Límite (s)' de la ventana), elige ganador, declara ganador y desempata los empates. El historial se agrupa por día y, dentro del día, por ítem.\nModo Auto (botón 'Auto' de la barra inferior): reparte cada cadáver que saquees (maestro despojador). Recetas y materiales al maestro; verde o mejor en rotación entre el grupo (excluyendo al maestro); dinero y basura al maestro; ítems de misión se saltan. Es PERMANENTE: se apaga solo con el clic izquierdo del botón 'Auto'." },
                     { title = "Spammers", content = "Compón y rota mensajes por canal (máx. 255 caracteres; si lo superas, el bucle se detiene y avisa).\n- De banda: prefijo, nombre, sufijo, duración, composición por rol y vista previa. Desde menú > Bandas > Spamear banda (requiere una banda registrada).\n- De reglas: elige la regla, duración y canales. Desde menú > Reglas > Spamear reglas o el minimapa." },
-                    { title = "Barra de acciones y temporizador DBM", content = "Cada botón de la barra inferior del menú flotante explica su acción en el tooltip (pasa el cursor por encima); el clic derecho suele hacer una acción secundaria.\nEl panel de cada icono en la configuración muestra sus ajustes, incluido el texto de su temporizador DBM.\nTemporizador DBM: si el addon DBM está instalado, acompaña 8 de estas acciones con una barra de cuenta atrás. Se activa en Configuración > General ('Acompañar las acciones con temporizador DBM')." },
+                    { title = "Barra de acciones y temporizador DBM", content = "Cada botón de la barra inferior del menú flotante explica su acción en el tooltip (pasa el cursor por encima); el clic derecho suele hacer una acción secundaria.\nEl panel de cada icono en la configuración muestra sus ajustes, incluido el texto de su temporizador DBM.\nMientras un spammer está activo (banda o reglas), la barra muestra un icono adicional que abre/oculta su ventana.\nTemporizador DBM: si el addon DBM está instalado, acompaña 8 de estas acciones con una barra de cuenta atrás. Se activa en Configuración > General ('Acompañar las acciones con temporizador DBM')." },
                     { title = "Comunicación y privacidad", content = "En grupo o banda puedes pedir al líder las asignaciones, reglas, mecánicas o bandas (botón 'Obtener' o clic derecho en 'Modo de raid').\nCada lista tiene una privacidad ante 'Obtener': Privado (no responde), Preguntar primero (pide confirmación) o Compartir (responde al instante).\nEl líder puede compartir asignaciones y listas con el resto de jugadores que usen el addon." },
-                    { title = "Minimapa", content = "El botón del minimapa: clic izquierdo abre/cierra el menú flotante; clic derecho abre un menú contextual (Configuración, Gestor de botín, Recoger ítems, Spamear reglas/banda y Recargar UI; el nombre de tu personaje y 'Jugador' se añaden si están disponibles).\nMantén Alt y arrastra para moverlo alrededor del minimapa. Se muestra/oculta con /rdminimap." },
-                    { title = "Registrar y fichas de jugador", content = "'Registrar' (menú > RaidDominion > Registrar) guarda un registro completo de tu jugador (clase, equipamiento, bandas, hermandad) para el portal web del proyecto.\nEl botón 'Jugador' de la barra abre tu ficha: información, equipamiento, bandas, instancias y monedas; el clic derecho abre el buscador de jugadores de tus listas.\nLos checks de seguimiento (Monedas, Equipamiento e Instancias) añaden lo que vigilas al tooltip del botón Jugador." },
+                    { title = "Minimapa", content = "El botón del minimapa: clic izquierdo abre/cierra el menú flotante; clic derecho abre un menú contextual (Configuración, Gestor de botín, Recoger ítems, Spamear reglas/banda, gestor de tu personaje, Jugador y Recargar UI).\nMantén Alt y arrastra para moverlo alrededor del minimapa. Se muestra/oculta con /rdminimap." },
+                    { title = "Registrar y fichas de jugador", content = "'Registrar' (menú > RaidDominion > Registrar) guarda un registro completo de tu personaje (clase, equipamiento, objetivos de equipo y moneda, bandas, hermandad) para el portal web " .. WEBSITE .. ".\nEl botón 'Jugador' de la barra abre tu ficha: información, equipamiento, bandas, instancias y monedas; el clic derecho abre el buscador de jugadores de tus listas.\nLos checks de seguimiento (Monedas, Equipamiento e Instancias) añaden lo que vigilas al tooltip del botón Jugador." },
                 }},
             }},
         }},

@@ -225,7 +225,7 @@ local function InitializeAddon()
 
     SetupSlashCommands()
 
-    Log(string.format("|cff00ff00[RaidDominion]|r Addon cargado (v%s). /rdh para ayuda.", RD.constants and RD.constants.VERSION or "3.0.0"))
+    Log(string.format("|cff00ff00[RaidDominion]|r Addon cargado (v%s). /rdh para ayuda.", RD.constants and RD.constants.VERSION or "3.1.0"))
 
     if RD.events and RD.events.Publish then
         RD.events:Publish("ADDON_INITIALIZED")

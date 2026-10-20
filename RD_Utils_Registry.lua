@@ -8,8 +8,14 @@
               convive en una sola DB sin borrarse entre sí, incluida la info
               de hermandad propia de cada uno (cuenta con varias guilds).
               Árbol por personaje:
-                player       -> nombre, reino, nivel, raza, clase, talento y
-                                equipamiento completo (slots 0..19)
+                player       -> nombre, reino, nivel, raza, clase, talento,
+                                equipamiento completo (slots 0..19) y las
+                                proyecciones al portal: `note` (nota global del
+                                personaje; vacía si no tiene) e `instances`
+                                (snapshot de instancias guardadas)
+                objectives   -> objetivos personales de equipamiento y metas
+                                de moneda (solo metas; rama compartida con el
+                                portal web, sin iconos ni flags de seguimiento)
                 assignments  -> ítems (roles/abilities/buffs/auras) asignados
                                 a este jugador
                 bands        -> bandas donde figura (compartidas), con rol/
@@ -21,9 +27,9 @@
                                 jugador es GM incluye además la lista completa
                                 de miembros SIN nota pública ni de oficial;
                                 sin hermandad la sección se omite.
-    COMPARTIDO (fuera del registro): configuración general, roles, abilities,
-              auras, buffs, mechanics, rules y bands viven UNA sola vez en la
-              DB para toda la cuenta (sin redundancia entre personajes).
+              COMPARTIDO (fuera del registro): configuración general, roles,
+              abilities, auras, buffs, mechanics, rules y bands viven UNA sola
+              vez en la DB para toda la cuenta (sin redundancia entre personajes).
     API PÚBLICA:
         - RD.utils.registry:Capture(silent)  -- registra AL PERSONAJE ACTUAL
         - RD.utils.registry:Get(key)         -- árbol propio o de otro personaje
@@ -31,8 +37,17 @@
         - RD.utils.registry:Count()          -- personajes registrados
         - RD.utils.registry:GetCurrentKey()  -- clave "Nombre-Reino" actual
         - RD.utils.registry:HasKey(key)      -- ¿existe ese registro?
-    EVENTOS: GUILD_ROSTER_UPDATE (descarga diferida del roster para GM).
-             Dispara CONFIG_CHANGED("registry.<Nombre-Reino>") vía RD.config:Set.
+              CONTRATO CON EL PORTAL:
+                - registry["Nombre-Reino"].objectives comparte objetivos
+                  personales de equipo y metas de moneda; no expone la raíz
+                  local itemGoals ni sus datos de seguimiento.
+                - player.note / player.instances: la nota global del personaje
+                  (store local playerNotes) y el snapshot de las instancias
+                  guardadas (lectura en vivo RD_Utils_Instances) se proyectan
+                  al portal SOLO al pulsar "Registrar"; sin esos módulos las
+                  claves se omiten y la web conserva lo ya publicado.
+              EVENTOS: GUILD_ROSTER_UPDATE (descarga diferida del roster para GM).
+                       Dispara CONFIG_CHANGED("registry.<Nombre-Reino>") vía RD.config:Set.
 ]]
 
 local addonName, private = ...
@@ -167,6 +182,117 @@ local function BuildPlayer()
     player.equipmentCount = equipped
     player.avgIlvl = avgIlvl
     return player
+end
+
+-- ============================================================================
+-- Sección: proyecciones locales al portal (nota global + instancias guardadas)
+-- ============================================================================
+
+-- Nota GLOBAL del personaje actual (RD_Utils_PlayerNotes, store local del
+-- addon). Se exporta SIEMPRE que el módulo esté disponible (incluso vacía):
+-- así la web distingue "sin nota" de "nota borrada" y un SV sin la clave
+-- (addon < 3.1.0) conserva lo ya publicado. Nunca se exportan las notas de
+-- otros personajes del store.
+local function BuildNote()
+    local notes = RD.utils and RD.utils.playerNotes
+    if not (notes and notes.GetText) then return nil end
+    local name = UnitName("player")
+    if not name or name == "" then return "" end
+    return tostring(notes:GetText(name) or "")
+end
+
+-- Snapshot de instancias guardadas para el portal (nombre, dificultad y
+-- reinicio ABSOLUTO): lo proyecta RD_Utils_Instances.Export. Sin el módulo la
+-- clave se omite (no pisa lo ya publicado); con el módulo se exporta SIEMPRE
+-- una lista (posiblemente vacía) para que un re-registro sin instancias limpie
+-- las expiradas.
+local function BuildInstances()
+    local util = RD.utils and RD.utils.instances
+    if not (util and util.Export) then return nil end
+    return util:Export()
+end
+
+-- ============================================================================
+-- Sección: objetivos personales compartidos con el portal
+-- ============================================================================
+
+-- Acepta solo números finitos; strings numéricos también se consideran datos
+-- malformados para el contrato y se tratan como nil.
+local function ToFiniteNumber(value)
+    if type(value) ~= "number" then
+        return nil
+    end
+    local number = value
+    if not number or number ~= number or number == math.huge or number == -math.huge then
+        return nil
+    end
+    return number
+end
+
+local function HasUsableName(name)
+    return type(name) == "string" and string.find(name, "%S") ~= nil
+end
+
+-- Lee cada API por separado: el registro sigue siendo válido si falta el
+-- módulo, uno de sus métodos o si una API devuelve una subtabla no disponible.
+local function ReadGoalList(itemGoals, methodName)
+    local method = itemGoals[methodName]
+    if type(method) ~= "function" then
+        return {}
+    end
+    local ok, goals = pcall(method, itemGoals)
+    if not ok or type(goals) ~= "table" then
+        return {}
+    end
+    return goals
+end
+
+-- Proyecta únicamente los campos públicos acordados. No serializa la raíz
+-- itemGoals: itemTracked/currencyTracked/instancesTracked e iconos son locales.
+local function BuildObjectives()
+    local objectives = { equipment = {}, currencies = {} }
+    local utils = RD.utils
+    local itemGoals = type(utils) == "table" and utils.itemGoals or nil
+    if type(itemGoals) ~= "table" then
+        return objectives
+    end
+
+    local slotGoals = ReadGoalList(itemGoals, "SlotGoals")
+    for slot, goal in pairs(slotGoals) do
+        local numericSlot = type(slot) == "number" and ToFiniteNumber(slot) or nil
+        local validSlot = numericSlot and numericSlot >= 0 and numericSlot <= 19
+            and numericSlot == math.floor(numericSlot)
+        if validSlot and type(goal) == "table" and HasUsableName(goal.name) then
+            objectives.equipment[#objectives.equipment + 1] = {
+                slot = numericSlot,
+                name = goal.name,
+                itemID = ToFiniteNumber(goal.itemID),
+                ilvl = ToFiniteNumber(goal.ilvl),
+                quality = ToFiniteNumber(goal.quality),
+                done = goal.done == true or goal.done == 1,
+            }
+        end
+    end
+    table.sort(objectives.equipment, function(a, b)
+        return a.slot < b.slot
+    end)
+
+    local currencyGoals = ReadGoalList(itemGoals, "CurrencyGoals")
+    for name, goal in pairs(currencyGoals) do
+        local target = type(goal) == "table" and ToFiniteNumber(goal.target) or nil
+        if HasUsableName(name) and target and target > 0 then
+            objectives.currencies[#objectives.currencies + 1] = {
+                name = name,
+                target = target,
+                reached = goal.reached == true or goal.reached == 1,
+            }
+        end
+    end
+    table.sort(objectives.currencies, function(a, b)
+        return a.name < b.name
+    end)
+
+    return objectives
 end
 
 -- ============================================================================
@@ -425,9 +551,22 @@ function Registry:Capture(silent)
     local playerName = UnitName("player") or ""
     local playerKey = CleanName(playerName)
 
+    local player = BuildPlayer()
+    -- Proyecciones locales al portal, dentro del scope del personaje: la nota
+    -- global (siempre que el módulo exista) y el snapshot de instancias.
+    local note = BuildNote()
+    if note ~= nil then
+        player.note = note
+    end
+    local instances = BuildInstances()
+    if instances ~= nil then
+        player.instances = instances
+    end
+
     local tree = {
         savedAt = date("%Y-%m-%d %H:%M:%S"),
-        player = BuildPlayer(),
+        player = player,
+        objectives = BuildObjectives(),
         assignments = BuildAssignments(playerKey),
         bands = BuildBands(playerKey),
         spammer = BuildSpammer(),

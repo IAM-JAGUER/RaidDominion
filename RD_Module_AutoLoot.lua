@@ -5,9 +5,12 @@
               equipamiento verde o mejor entre el grupo/banda (excluyendo al
               maestro despojador) y dirigiendo recetas, materiales, dinero y
               basura al maestro, con confirmación POR EVENTO
-              (LOOT_SLOT_CHANGED/LOOT_SLOT_CLEARED) y rotación de destinatarios
-              cuando el servidor rechaza la entrega (bolsas llenas / ya lo tiene
-              / fuera de rango). Salta los ítems que inician misiones. Sin
+              (LOOT_SLOT_CHANGED/LOOT_SLOT_CLEARED) y rotación de destinatarios:
+              cada ítem nuevo se reparte en round-robin al siguiente jugador del
+              grupo (nunca dos seguidos al mismo), y si el servidor rechaza la
+              entrega (bolsas llenas / ya lo tiene / fuera de rango) se prueba
+              al siguiente dentro del mismo slot. Salta los ítems que inician
+              misiones. Sin
               C_Timer: los retardos se programan con MessageManager:Schedule y
               el avance se guía por eventos LOOT_* con token anti-eventos viejos.
               MODO PERMANENTE: la sesión NO termina sola; sigue en modo
@@ -71,6 +74,7 @@ local state = {
     stats = nil,
     masterName = nil,      -- nombre limpio del maestro despojador
     recipients = {},       -- lista barajada de destinatarios (sin el maestro)
+    rotateIndex = 1,       -- cursor de rotación: siguiente destinatario a probar para el próximo ítem
 }
 AutoLoot.state = state
 
@@ -99,26 +103,42 @@ function AutoLoot:NotifyActive(active)
     end
 end
 
--- Anuncia el ganador SIEMPRE por el canal de salida configurado en la pestaña
--- GENERAL (chat.channel): SendMessage sin canal usa MessageManager:GetChannel.
--- No hay opción de canal propia.
+-- Anuncia el ganador por el canal de salida configurado en la pestaña GENERAL
+-- (chat.channel). No hay opción de canal propia.
+-- ENTREGA ROBUSTA: el maestro SIEMPRE ve quién recibió qué. Con canal SYSTEM
+-- (local) se envía DIRECTO por SendSystemMessage, el MISMO camino probado y
+-- visible de "Auto: sigue activo" y "Cadáver procesado". Con canal de difusión
+-- (RAID/GUILD/...) se envía por SendMessage al canal configurado Y además una
+-- copia LOCAL (sin link, texto plano) por SendSystemMessage, para que la entrega
+-- no dependa de la resolución de canal ni del estado del chat del grupo.
 function AutoLoot:AnnounceWinner(playerName, itemLink)
     if not playerName or not itemLink then return end
+    local itemName = itemLink:match("|h%[(.-)%]|h") or itemLink
     local msg = string.format("|cff00c8ff[RaidDominion]|r %s recibió: %s", playerName, itemLink)
+    local plain = string.format("|cff00c8ff[RaidDominion]|r %s recibió: %s", playerName, "[" .. itemName .. "]")
     local mm = RD.modules and RD.modules.messageManager
-    if not (mm and mm.SendMessage) then
-        self:Msg(msg)
+    if not (mm and mm.SendSystemMessage) then
+        print(plain)
         return
     end
-    local ok, err = pcall(mm.SendMessage, mm, msg)
-    if ok then
-        local ch = (mm.GetChannel and pcall(mm.GetChannel, mm)) or nil
-        self:Debug(string.format("anuncio de ganador enviado (canal %s): %s recibió %s",
-            tostring(select(2, ch) or "?"), playerName, itemLink))
-    else
-        self:Debug(string.format("anuncio de ganador: fallo al enviar (%s); se usa sistema como respaldo", tostring(err)))
-        self:Msg(msg)
+    local ch = (mm.GetChannel and select(2, pcall(mm.GetChannel, mm))) or nil
+    if ch == "SYSTEM" then
+        -- LOCAL: se envía directo por el camino probado de los mensajes de cadáver.
+        mm:SendSystemMessage(plain)
+        self:Debug(string.format("anuncio de ganador enviado (SYSTEM local): %s recibió %s", playerName, itemName))
+        return
     end
+    -- Difusión por el canal configurado (chat.channel): el grupo/hermandad lo ve.
+    if mm.SendMessage then
+        local ok, err = pcall(mm.SendMessage, mm, msg)
+        if not ok then
+            self:Debug(string.format("anuncio de ganador: fallo al enviar a %s (%s)", tostring(ch or "?"), tostring(err)))
+        end
+    end
+    -- Copia LOCAL garantizada (texto plano, camino probado): el maestro siempre
+    -- ve quién recibió qué aunque el canal de difusión no llegue o el chat del
+    -- grupo esté filtrado.
+    mm:SendSystemMessage(plain)
 end
 
 -- Programa una función tras un retraso (sin C_Timer; fallback síncrono en tests).
@@ -345,21 +365,26 @@ function AutoLoot:GiveToMaster(slot)
     end)
 end
 
--- Reparte un ítem de valor a un destinatario aleatorio del grupo. CADA
+-- Reparte un ítem de valor a un destinatario del grupo EN ROTACIÓN. Cada ítem
+-- nuevo comienza por el siguiente al que recibió el anterior (round-robin:
+-- state.rotateIndex), de modo que los repartos se distribuyen entre TODO el
+-- grupo y no caen siempre sobre el primer jugador de la lista barajada. CADA
 -- (slot, índice) SE ENTREGA UNA SOLA VEZ: AutoLootMaster registra los probados,
 -- así que ningún candidato recibe el mismo slot dos veces (evita duplicados).
 -- NUNCA se reparte al índice del maestro (guarda contra mapas desfasados: un
--- índice erróneo no puede darte el ítem a ti). La confirmación es POR EVENTO
--- (LOOT_SLOT_CHANGED/LOOT_SLOT_CLEARED) con refuerzo del flag "locked" de
--- GetLootSlotInfo; si el servidor rechaza la entrega dentro del timeout
--- (verifyDelay * 2), se rota al siguiente destinatario real. Agotados todos,
--- el ítem queda SIN REPARTIR y la ventana se deja abierta (lo decide
--- CloseAndAdvance).
+-- índice erróneo no puede darte el ítem a ti).
+-- ANUNCIO INMEDIATO (paridad KRT/v2): el ganador se anuncia en cuanto
+-- GiveMasterLoot no da error, SIN esperar la confirmación por evento
+-- (LOOT_SLOT_CHANGED/LOOT_SLOT_CLEARED). En 3.3.5a esos eventos no siempre
+-- llegan al repartir y, sin este cambio, el ítem SÍ se entregaba pero el anuncio
+-- jamás se emitía (quedaba secuestrado por una heurística de confirmación que no
+-- disparaba en el cliente real). Si GiveMasterLoot da error (índice inválido,
+-- slot no disponible), se rota al siguiente destinatario real sin anunciar
+-- (jamás un anuncio falso). Agotados todos, el ítem queda SIN REPARTIR y la
+-- ventana se deja abierta (lo decide CloseAndAdvance).
 function AutoLoot:GiveSlot(slot)
     local ptoken = state.procToken
     local itemLink = GetLootSlotLink(slot)
-    local done = false
-    local recipient = nil
 
     local function NextSlot()
         self:Delay(TUNING.ITEM_DELAY, function()
@@ -369,26 +394,11 @@ function AutoLoot:GiveSlot(slot)
         end)
     end
 
-    local function FinishGive(given)
-        if done then return end
-        done = true
-        if given and recipient then
-            state.stats.given = state.stats.given + 1
-            AutoLootCore:LogDistribution(recipient, itemLink)
-            self:AnnounceWinner(recipient, itemLink)
-            self:Debug(string.format("slot %d -> %s (confirmado)", slot, recipient))
-        else
-            state.stats.unassigned = state.stats.unassigned + 1
-            self:Debug(string.format("slot %d NO confirmado: se queda sin repartir", slot))
-        end
-        NextSlot()
-    end
-
     local function TryGive()
-        if done or not state.busy or state.procToken ~= ptoken then return end
+        if not state.busy or state.procToken ~= ptoken then return end
         local masterName = state.masterName or (UnitName("player") or "")
         local masterClean = AutoLootCore:CleanName(masterName)
-        local pl = AutoLootMaster:NextRecipient(state.recipients)
+        local pl, pi = AutoLootMaster:NextRecipient(state.recipients, state.rotateIndex)
         if not pl then
             -- Todos los destinatarios probados: sin repartir.
             state.stats.unassigned = state.stats.unassigned + 1
@@ -412,50 +422,33 @@ function AutoLoot:GiveSlot(slot)
             TryGive()
             return
         end
-        recipient = pl
-        if GiveMasterLoot then pcall(GiveMasterLoot, slot, idx) end
-        self:Debug(string.format("GiveMasterLoot(slot %d -> %s, idx %d)", slot, pl, idx))
-        -- Confirmación por evento con timeout (verifyDelay * 2) y refuerzo locked
-        local checksLeft = 2
-        local function CheckOnce()
-            if done or not state.busy or state.procToken ~= ptoken then return end
-            if AutoLootMaster:IsConfirmed(slot) then
-                self:Debug(string.format("asignación confirmada: %s recibió el slot %d (LOOT_SLOT_CHANGED)", pl, slot))
-                FinishGive(true)
-                return
-            end
-            -- Confirmación VISUAL (más fiable que el evento en algunos clientes):
-            -- si el slot ya no tiene ítem, la entrega se dio (el ítem salió del
-            -- cadáver). Si el servidor rechazara la entrega, el ítem seguiría.
-            local okSlot, isItem = pcall(function()
-                return (LootSlotIsItem and LootSlotIsItem(slot)) == true
-            end)
-            if okSlot and not isItem then
-                AutoLootMaster:Confirm()
-                self:Debug(string.format("asignación confirmada: %s recibió el slot %d (slot vacío)", pl, slot))
-                FinishGive(true)
-                return
-            end
-            -- Refuerzo: el servidor marcó el slot como bloqueado (locked) sin
-            -- disparar el evento en algunos clientes.
-            local okLocked, _, _, _, _, locked = pcall(GetLootSlotInfo, slot)
-            if okLocked and locked then
-                AutoLootMaster:Confirm()
-                self:Debug(string.format("asignación confirmada: %s recibió el slot %d (locked)", pl, slot))
-                FinishGive(true)
-                return
-            end
-            if checksLeft > 0 then
-                checksLeft = checksLeft - 1
-                self:Delay(TUNING.VERIFY_DELAY, CheckOnce)
-            else
-                -- Rechazada: rotar al siguiente destinatario real (nunca re-da
-                -- el mismo slot+índice). La ventana queda abierta si se agotan.
-                self:Debug(string.format("entrega a '%s' rechazada para el slot %d: probar otro", pl, slot))
-                TryGive()
-            end
+        local ok = true
+        if GiveMasterLoot then
+            ok = pcall(GiveMasterLoot, slot, idx)
         end
-        self:Delay(TUNING.VERIFY_DELAY, CheckOnce)
+        self:Debug(string.format("GiveMasterLoot(slot %d -> %s, idx %d)", slot, pl, idx))
+        if not ok then
+            -- El API dio error (índice inválido, slot no disponible...): se rota
+            -- al siguiente destinatario real sin anunciar (jamás un anuncio falso).
+            self:Debug(string.format("GiveMasterLoot dio error en el slot %d: probar otro destinatario", slot))
+            TryGive()
+            return
+        end
+        -- Anuncio INMEDIATO por el canal configurado (chat.channel) y conteo de
+        -- la entrega en el acto: el informe es honesto y el cursor round-robin
+        -- avanza aunque el evento de confirmación no llegue (3.3.5a no siempre lo
+        -- dispara al repartir). Si la entrega se rechazara después (caso raro),
+        -- no hay retract (paridad KRT/v2).
+        self:AnnounceWinner(pl, itemLink)
+        state.stats.given = state.stats.given + 1
+        AutoLootCore:LogDistribution(pl, itemLink)
+        local n = #state.recipients
+        if pi and n > 0 then
+            state.rotateIndex = (pi % n) + 1
+            if state.rotateIndex > n then state.rotateIndex = 1 end
+        end
+        self:Debug(string.format("slot %d -> %s (entregado y anunciado)", slot, pl))
+        NextSlot()
     end
 
     AutoLootMaster:BeginGive(slot, itemLink)
@@ -544,6 +537,7 @@ function AutoLoot:Finish()
     state.token = state.token + 1
     state.stats = nil
     state.masterName = nil
+    state.rotateIndex = 1
     self:NotifyActive(false)
     if report and report ~= "" then
         local mm = RD.modules and RD.modules.messageManager
@@ -616,6 +610,9 @@ function AutoLoot:Run()
         end
     end
     state.recipients = filtered
+    -- Rotación round-robin entre ítems: empieza por el primer destinatario y
+    -- cada reparto confirmado avanza el cursor al siguiente jugador.
+    state.rotateIndex = 1
 
     self:NotifyActive(true)
     local nearby = self:ScanCorpses(TUNING.SCAN_LIMIT)
@@ -642,8 +639,9 @@ end
 
 function AutoLoot:LOOT_CLOSED()
     if not state.busy then return end
-    -- Confirmar la entrega pendiente: si la ventana se cerró, el ítem en curso
-    -- se dio (o la ventana se gestionó manualmente). El CheckOnce lo detecta.
+    -- Confirmar la entrega pendiente por si la ventana se cierra con un ítem en
+    -- curso (marca del estado de AutoLootMaster; el anuncio ya se emitió en el
+    -- momento del reparto, no depende de esta confirmación).
     AutoLootMaster:ConfirmPending()
     if state.phase == "processing" or state.phase == "close" or state.phase == "collecting" then
         -- Si ya hay OTRA ventana abierta (el jugador cambió de cadáver antes de

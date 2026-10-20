@@ -206,11 +206,16 @@ function MenuFrame:Create()
             end
             self:Refresh()
         end)
-        -- El estado de spam de banda cambia (inicio/parada): re-render para
-        -- aplicar/quit­ar el efecto "en spam" del submenú Bandas en vivo.
+        -- El estado de spam cambia (inicio/parada de cualquiera de los dos
+        -- spammers): re-render para aplicar/quitar el efecto "en spam" del
+        -- submenú Bandas y mostrar/ocultar el icono dinámico de la barra.
         RD.events:Subscribe("SPAM_STATE_CHANGED", function()
             if self.isShown then
                 self:Refresh()
+            else
+                -- Oculto: se marca pendiente para que al reabrir se reevalúe la
+                -- barra (el icono del spammer activo debe aparecer/desaparecer).
+                self.needsRefresh = true
             end
         end)
     end
@@ -589,7 +594,14 @@ function MenuFrame:RenderCurrentMenu()
     -- Barra de botones inferior centrada en la base del marco. Se renderiza UNA
     -- vez y UpdateBar reevalúa cada render la visibilidad (barItem.enabled) y
     -- reposiciona los visibles sin huecos, ajustando el ancho de la barra.
-    local barItems = (RD.constants and RD.constants.ACTION_BAR and RD.constants.ACTION_BAR.ITEMS) or {}
+    -- La lista la compone MenuFactory:MenuBarItems: fijos + DINÁMICOS (iconos de
+    -- spammers activos; aparecen/desaparecen vía SPAM_STATE_CHANGED -> Refresh).
+    local barItems
+    if RD.ui and RD.ui.menuFactory and RD.ui.menuFactory.MenuBarItems then
+        barItems = RD.ui.menuFactory:MenuBarItems()
+    else
+        barItems = (RD.constants and RD.constants.ACTION_BAR and RD.constants.ACTION_BAR.ITEMS) or {}
+    end
     local barSize = (RD.constants and RD.constants.ACTION_BAR and RD.constants.ACTION_BAR.BUTTON_SIZE) or 20
     local barPad = (RD.constants and RD.constants.ACTION_BAR and RD.constants.ACTION_BAR.BUTTON_PADDING) or 4
     local visibleBar = 0

@@ -205,9 +205,15 @@ local function BuildPlayerRow(self, child, player)
         end
         GameTooltip:SetOwner(nameBtn, "ANCHOR_RIGHT")
         GameTooltip:SetText(player.name, 1, 1, 1)
-        -- Incluye la nota si el jugador tiene una
-        if player.notes and player.notes ~= "" then
-            GameTooltip:AddLine("Nota: " .. tostring(player.notes), 1, 1, 1, true)
+        -- Incluye la nota GLOBAL del personaje (fuente de verdad) con fallback a
+        -- la de la banda (entradas previas a la migración).
+        local notesStore = RD.utils and RD.utils.playerNotes
+        local noteText = notesStore and notesStore:GetText(player.name)
+        if noteText == nil or noteText == "" then
+            noteText = player.notes
+        end
+        if noteText and noteText ~= "" then
+            GameTooltip:AddLine("Nota: " .. tostring(noteText), 1, 1, 1, true)
         end
         GameTooltip:AddLine("Clic: editar jugador", GOLD_R, GOLD_G, GOLD_B, true)
         GameTooltip:Show()

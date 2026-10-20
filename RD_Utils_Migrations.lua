@@ -17,18 +17,53 @@ _G.RaidDominion = RD
 local Migrations = {}
 
 -- Copia profunda (helper central en RD.UIUtils.DeepCopy; RD_Config conserva el
--- suyo local porque se carga antes que RD_UI_Utils).
-local DeepCopy = (RD.UIUtils and RD.UIUtils.DeepCopy) or function(orig)
+-- suyo local porque se carga antes que RD_UI_Utils). El fallback es una
+-- `local function` aparte: un `local f = function() ... f() ... end` en la
+-- misma sentencia resolvería la recursión al GLOBAL (nil en el harness), no a
+-- la propia función.
+local function LocalDeepCopy(orig)
     local origType = type(orig)
     if origType ~= "table" then return orig end
     local copy = {}
     for k, v in next, orig, nil do
-        copy[DeepCopy(k)] = DeepCopy(v)
+        copy[LocalDeepCopy(k)] = LocalDeepCopy(v)
     end
-    return setmetatable(copy, DeepCopy(getmetatable(orig)))
+    return setmetatable(copy, LocalDeepCopy(getmetatable(orig)))
 end
+local DeepCopy = (RD.UIUtils and RD.UIUtils.DeepCopy) or LocalDeepCopy
 
 local LIST_KEYS = { "roles", "buffs", "auras", "abilities", "mechanics", "rules" }
+
+-- Normaliza un nombre a la clave del store de notas (RD_Utils_PlayerNotes).
+local function CleanName(s)
+    if RD.UIUtils and RD.UIUtils.CleanName then
+        return RD.UIUtils.CleanName(s)
+    end
+    local clean = string.gsub(tostring(s or ""), "%-.*", "")
+    clean = string.gsub(clean, "%s+", "")
+    return string.lower(clean)
+end
+
+-- Migración (una sola vez): la nota vivía SOLO dentro de cada banda
+-- (member.notes). Ahora es GLOBAL por personaje (RD_Utils_PlayerNotes). Siembra
+-- el store global desde la primera nota no vacía encontrada, sin pisar entradas
+-- ya existentes (el usuario pudo editar la global después de migrar).
+local function SeedPlayerNotes(db)
+    if type(db.playerNotes) ~= "table" then db.playerNotes = {} end
+    local bandsList = db.bands
+    if type(bandsList) ~= "table" then return end
+    for _, band in ipairs(bandsList) do
+        for _, p in ipairs(band.players or {}) do
+            local text = p and p.notes
+            if text and text ~= "" then
+                local key = CleanName(p.name)
+                if key ~= "" and type(db.playerNotes[key]) ~= "table" then
+                    db.playerNotes[key] = { text = text, display = tostring(p.name or "") }
+                end
+            end
+        end
+    end
+end
 
 -- Limpia asignaciones huérfanas: claves de "assignments.<lista>" que no
 -- coinciden con ningún ítem de la lista actual (restos de versiones/estados
@@ -97,6 +132,13 @@ function Migrations:Run(db, defaults)
     MigrateRegistryPerCharacter(db)
     CleanAssignments(db)
 
+    -- Migración (una sola vez): siembra las notas globales por personaje desde
+    -- las notas de banda (legacy), para que la fuente de verdad quede poblada.
+    if not db._playerNotesSeeded then
+        SeedPlayerNotes(db)
+        db._playerNotesSeeded = true
+    end
+
     -- Migración (una sola vez): el antiguo default de canal era "SYSTEM";
     -- ahora el default es "DEFAULT" (auto-resolución por contexto, como la base).
     if db.chat and db.chat.channel == "SYSTEM" and not db._channelMigrated then
@@ -119,14 +161,31 @@ function Migrations:Run(db, defaults)
     -- Migración de listas configurables: se siembran SOLO una vez (primera
     -- carga, con flag). Así el usuario puede vaciar una lista a propósito sin
     -- que se re-siembre en el siguiente load (reglas duplicadas que reaparecen).
+    -- La fuente es RD.data.defaultLists (roles, habilidades, buffs, auras y
+    -- reglas; RD_Data_DefaultLists.lua, carga anterior en el .toc);
+    -- mecánicas siguen cayendo a los defaults del DEFAULT_CONFIG (vacías).
     if defaults.roles and not db._listsSeeded then
+        local seed = (RD.data and RD.data.defaultLists) or {}
         for _, k in ipairs(LIST_KEYS) do
             local v = db[k]
             if type(v) ~= "table" or #v == 0 then
-                db[k] = DeepCopy(defaults[k])
+                db[k] = DeepCopy(seed[k] or defaults[k])
             end
         end
         db._listsSeeded = true
+    end
+
+    -- Migración (una sola vez): la regla de fábrica "RaidDominion" se siembra en
+    -- la lista de reglas SOLO si está vacía. Flag propio (_rulesSeeded) para
+    -- alcanzar cuentas que ya pasaron la siembra general (_listsSeeded) antes de
+    -- existir este default. Nunca pisa reglas ya configuradas por el usuario.
+    if RD.data and RD.data.defaultLists and RD.data.defaultLists.rules
+        and not db._rulesSeeded then
+        local v = db.rules
+        if type(v) ~= "table" or #v == 0 then
+            db.rules = DeepCopy(RD.data.defaultLists.rules)
+        end
+        db._rulesSeeded = true
     end
 
     -- Migración (una sola vez): normaliza booleanos guardados como 1/0

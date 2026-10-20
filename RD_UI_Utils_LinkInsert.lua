@@ -9,6 +9,8 @@
     API PÚBLICA (registrada sobre RD.UIUtils):
         - UIUtils.EnableLinkInsertion(editBox)   (idempotente por caja)
         - UIUtils.DisableLinkInsertion(editBox)  (opt-out de campos numéricos)
+        - UIUtils.EnableLinkDisplay(editBox)     (clic sobre enlaces: ver/enviar)
+        - UIUtils.FindLinkAtCursor(text, caret)  (detector puro, testable)
     ORDEN: cargar DESPUÉS de RD_UI_Utils.lua y ANTES de cualquier widget que
            cree EditBoxes (ver RaidDominion.toc).
     EVENTOS: Ninguno.
@@ -20,26 +22,28 @@ local UIUtils = RD.UIUtils or {}
 --[[
     Habilita en un EditBox la inserción de enlaces del juego (shift-clic de
     ítems, hechizos/profesiones, misiones y logros), igual que el cuadro de
-    chat y sin botones extra: el propio EditBox los acepta. Dos vías en 3.3.5a:
-      - Misiones/logros/hechizos llaman al global ChatEdit_InsertLink: se
-        envuelve UNA sola vez y, si alguno de los EditBoxes registrados está
-        visible y enfocado, se inserta el enlace en el cursor (con un espacio
-        previo, como hace el chat, para que sea parseable al reenviarlo).
-      - Ítems: HandleModifiedItemClick (C-side, no pasa por Lua) inserta en
-        ACTIVE_CHAT_EDIT_BOX — el mismo receptor que usa ChatEdit_InsertLink —,
-        que solo se setea para cajas de chat reales (ChatEdit_ActivateChat).
-        Mientras una caja registrada esté visible y enfocada se registra como
-        ACTIVE_CHAT_EDIT_BOX y se libera al perder el foco u ocultarse; con eso
-        el shift-clic de un ítem llega a la caja. Nunca se usa
-        ChatEdit_ActivateChat: toca header/focusLeft/Mid/Right y frame strata,
-        recursos que una caja de contenido no tiene.
+    chat y sin botones extra: el propio EditBox los acepta. En 3.3.5a TODAS
+    las vías pasan por el global Lua ChatEdit_InsertLink: los ítems pulsados
+    con shift en bolsas/banco/mercader/personaje llegan vía
+    HandleModifiedItemClick (definido en FrameXML/ItemButtonTemplate.lua, que
+    llama a ChatEdit_InsertLink), y misiones/logros/hechizos lo llaman
+    directamente. Se envuelve UNA sola vez y, si alguno de los EditBoxes
+    registrados está visible y enfocado, se inserta el enlace en el cursor
+    (con un espacio previo, como hace el chat, para que sea parseable al
+    reenviarlo).
+
+    IMPORTANTE: nunca se toca ACTIVE_CHAT_EDIT_BOX con una caja del addon.
+    ChatEdit_ActivateChat/DeactivateChat asumen una caja de chat REAL (header,
+    focusLeft/Mid/Right, estrata): al desactivar una caja RD la ocultarían
+    (estilo clásico), le borrarían el texto (estilo IM) o darían error, y
+    rompería abrir el chat con Intro.
 
     El auto-registro es CENTRAL: el CreateFrame del addon se envuelve una sola
     vez y todo EditBox cuya propiedad sea del addon (nombre "RD*"/"RaidDominion*"
     o ancestro con ese nombre) hereda este comportamiento automáticamente, con
     o sin nombre. Los campos EXCLUSIVAMENTE numéricos (SetNumeric(true), p.ej.
-    duración, gearscore o tiempo) se excluyen en caliente: jamás reciben ACTIVE
-    ni enlaces (un enlace no cabe en un número).
+    duración, gearscore o tiempo) se excluyen en caliente: jamás reciben
+    enlaces (un enlace no cabe en un número).
 ]]
 local linkBoxes = {}
 local linkHookInstalled = false
@@ -75,46 +79,15 @@ local function FocusedLinkBox()
     return nil
 end
 
-local function ClearActiveEditBox(box)
-    if _G.ACTIVE_CHAT_EDIT_BOX == box then
-        _G.ACTIVE_CHAT_EDIT_BOX = nil
-    end
-end
-
 function UIUtils.EnableLinkInsertion(editBox)
     if not editBox or not editBox.Insert then return false end
     if editBox.GetObjectType and editBox:GetObjectType() ~= "EditBox" then return false end
     if editBox.RD_linkInsertionDisabled then return false end
     linkBoxes[editBox] = true
-
-    -- Registrar la caja como ACTIVE_CHAT_EDIT_BOX mientras esté visible y
-    -- enfocada (vía de inserción de ítems). Solo se toma el rol si no hay otra
-    -- caja activa o esta ya es propia: jamás se pisa una caja de chat real.
-    -- Los campos numéricos/deshabilitados quedan fuera. Preserva los scripts
-    -- previos (WrapScript encadena) y es idempotente por caja.
-    if not editBox.RD_linkInsertionRegistered then
-        editBox.RD_linkInsertionRegistered = true
-        local function WrapScript(name, handler)
-            local orig = editBox:GetScript(name)
-            editBox:SetScript(name, function(self, ...)
-                if orig then orig(self, ...) end
-                return handler(self, ...)
-            end)
-        end
-        WrapScript("OnEditFocusGained", function(self)
-            if not LinkBoxAllowed(self) then return end
-            local active = _G.ACTIVE_CHAT_EDIT_BOX
-            if not active or active == self or linkBoxes[active] then
-                _G.ACTIVE_CHAT_EDIT_BOX = self
-            end
-        end)
-        WrapScript("OnEditFocusLost", function(self)
-            ClearActiveEditBox(self)
-        end)
-        WrapScript("OnHide", function(self)
-            ClearActiveEditBox(self)
-        end)
-    end
+    -- Marca de identificación de cajas del addon (la usa EnableLinkDisplay al
+    -- elegir destino de chat para no pisar una caja RD). NO se toca
+    -- ACTIVE_CHAT_EDIT_BOX: ver la nota del encabezado.
+    editBox.RD_linkInsertionRegistered = true
 
     if linkHookInstalled then return true end
     linkHookInstalled = true
@@ -142,7 +115,93 @@ function UIUtils.DisableLinkInsertion(editBox)
     if not editBox then return false end
     editBox.RD_linkInsertionDisabled = true
     linkBoxes[editBox] = nil
-    ClearActiveEditBox(editBox)
+    return true
+end
+
+-- Devuelve el enlace crudo (|c...|H...|h[...]|h|r) que contiene la posición
+-- `caret` de un texto, junto con el índice de su último byte (posición de la
+-- 'r' de |r). `caret` usa la convención de GetCursorPosition (nº de bytes a la
+-- izquierda del cursor). Un |H suelto sin cierre |h|r no es un enlace.
+function UIUtils.FindLinkAtCursor(text, caret)
+    if not text or text == "" or not caret or caret < 1 then return nil end
+    local pos = 1
+    while true do
+        local head = text:find("|H", pos, true)
+        if not head or head > caret then return nil end
+        local closeAt = text:find("|h|r", head + 2, true)
+        if not closeAt then return nil end
+        local endlink = closeAt + 3
+        if caret < endlink then
+            -- El enlace incluye su código de color (|cFFRRGGBB) si lo tiene.
+            local startlink = head
+            local colorAt = head - 10
+            if colorAt >= 1 and text:sub(colorAt, colorAt + 1) == "|c"
+                and text:sub(colorAt + 2, colorAt + 9):match("^%x%x%x%x%x%x%x%x$") then
+                startlink = colorAt
+            end
+            if caret >= startlink then
+                return text:sub(startlink, endlink), endlink
+            end
+        end
+        pos = endlink + 1
+    end
+end
+
+--[[
+    Habilita en un EditBox el comportamiento CLICABLE de los enlaces que
+    contenga (ítems, hechizos, misiones, logros...), igual que el chat:
+      - clic: ver el enlace (SetItemRef; para ítems abre su ventana/tooltip).
+      - shift-clic: enviarlo al chat (usa la ventana activa; si no hay ninguna,
+        abre el campo de chat y lo inserta), como es estándar.
+      - el clic no deja el texto del enlace en edición: el cursor se retira
+        justo después del enlace.
+    En 3.3.5a el EditBox NO soporta SetHyperlinksEnabled (esa API solo existe
+    en ScrollingMessageFrame y SimpleHTML): se usa la técnica del clásico
+    TinyPad — al soltar el botón se lee la posición del cursor que el propio
+    clic colocó en el texto y se busca el enlace que la contiene.
+    Idempotente por caja; no interfiere con la inserción (EnableLinkInsertion).
+]]
+function UIUtils.EnableLinkDisplay(editBox)
+    if not editBox or not editBox.GetCursorPosition then return false end
+    if editBox.RD_linkDisplayRegistered then return true end
+    editBox.RD_linkDisplayRegistered = true
+
+    local origMouseUp = editBox:GetScript("OnMouseUp")
+    editBox:SetScript("OnMouseUp", function(self, button)
+        if origMouseUp then origMouseUp(self, button) end
+        local link, endlink = UIUtils.FindLinkAtCursor(self:GetText(), self:GetCursorPosition())
+        if not link then return end
+        if _G.IsModifiedClick and _G.IsModifiedClick("CHATLINK") then
+            -- Shift-clic: enviar el enlace al chat, como es estándar. Se usa la
+            -- ventana de chat activa si existe; si no (el clic en la nota
+            -- desactivó el chat), se abre el campo de chat de destino
+            -- (ChatEdit_ChooseBoxForSend: por defecto el marco de siempre) y se
+            -- inserta ahí. Jamás en una caja RD.
+            local target = _G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow()
+            if not target or target.RD_linkInsertionRegistered then
+                target = _G.ChatEdit_ChooseBoxForSend and _G.ChatEdit_ChooseBoxForSend()
+            end
+            if target and _G.ChatEdit_ActivateChat and not target.RD_linkInsertionRegistered then
+                -- Defensa: si ACTIVE apuntase a una caja RD, ChatEdit_ActivateChat
+                -- la desactivaría por dentro (ocultar/borrar su texto). Nunca
+                -- debe llegar una caja RD a ChatEdit_DeactivateChat.
+                local active = _G.ACTIVE_CHAT_EDIT_BOX
+                if active and active.RD_linkInsertionRegistered then
+                    _G.ACTIVE_CHAT_EDIT_BOX = nil
+                end
+                _G.ChatEdit_ActivateChat(target)
+                target:Insert(link)
+                return
+            end
+        end
+        if _G.SetItemRef then
+            -- Igual que el chat: primer argumento = dato del enlace.
+            local linkData = link:match("|H(.-)|h")
+            _G.SetItemRef(linkData or link, link, button)
+        end
+        -- "Sin ser editable": el cursor sale del enlace (tras su |r).
+        self:SetCursorPosition(endlink)
+    end)
     return true
 end
 

@@ -17,7 +17,9 @@
         - RD.modules.autoLootMaster:BuildCandidateMap(slot) -> mapa (delega en autoLootCore)
         - RD.modules.autoLootMaster:IndexFor(name)          -> índice GiveMasterLoot
         - RD.modules.autoLootMaster:BeginGive(slot, itemLink)
-        - RD.modules.autoLootMaster:NextRecipient(list)     -> siguiente destinatario sin probar
+        - RD.modules.autoLootMaster:NextRecipient(list, startIndex) -> siguiente destinatario sin probar
+                                                                      (búsqueda circular desde startIndex;
+                                                                       devuelve name, index)
         - RD.modules.autoLootMaster:MarkTried(name)
         - RD.modules.autoLootMaster:OnSlotChanged(slot) / OnSlotCleared(slot)
         - RD.modules.autoLootMaster:IsConfirmed(slot)       -> ¿la entrega del slot se confirmó?
@@ -79,15 +81,25 @@ end
 
 -- Devuelve el siguiente destinatario de la lista que aún no se ha probado para
 -- el slot pendiente y lo marca como probado; nil si se agotaron. NUNCA repite.
-function AutoLootMaster:NextRecipient(recipients)
+-- La búsqueda es CIRCULAR desde startIndex (el cursor de rotación entre ítems:
+-- cada ítem nuevo empieza por el siguiente al que recibió el anterior). Devuelve
+-- también el índice usado para que el orquestador avance el cursor.
+function AutoLootMaster:NextRecipient(recipients, startIndex)
     local pending = state.pending
     if not pending then return nil end
-    for _, name in ipairs(recipients or {}) do
+    local n = #(recipients or {})
+    if n == 0 then return nil end
+    local start = startIndex or 1
+    if start < 1 then start = 1 end
+    if start > n then start = n end
+    for offset = 0, n - 1 do
+        local i = ((start + offset - 1) % n) + 1
+        local name = recipients[i]
         local key = AutoLootCore:CleanName(name)
         if not pending.tried[key] then
             pending.tried[key] = true
             pending.recipient = name
-            return name
+            return name, i
         end
     end
     return nil

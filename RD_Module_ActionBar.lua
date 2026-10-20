@@ -540,6 +540,13 @@ local function HandlePull()
         onAccept = function()
             -- Sí confirmado: DBM "FIJANDO PULL" (petición del usuario) antes de pedir el tiempo.
             FireDbmNotice("FIJANDO PULL", 10)
+            -- Check normal y corriente A LA VEZ que FIJANDO PULL: el líder lanza el
+            -- ready check nativo (DoReadyCheck) para que la banda confirme mientras
+            -- se fija el tiempo. Guardas: solo el líder/in-group y si el API existe
+            -- (un no-líder que lo invoque no hace nada y puede dar error de UI).
+            if (IsRaidLeader() or IsPartyLeader()) and (InRaid() or InParty()) and DoReadyCheck then
+                DoReadyCheck()
+            end
             AskPullTime()
         end,
         onCancel = function()
@@ -687,6 +694,30 @@ local function HandlePlayerFinder()
     pcall(pw.Toggle, pw)
 end
 
+-- ============ Spammers (iconos dinámicos de la barra) ============
+-- Clic izquierdo en el icono "Spammer de banda": abre/oculta su ventana (el
+-- icono existe en la barra SOLO mientras el spam de banda está activo; lo
+-- gobiernan ACTION_BAR.DYNAMIC_ITEMS + SPAM_STATE_CHANGED).
+local function HandleSpamWindow()
+    local sw = RD.ui and RD.ui.spammerWindow
+    if not sw or not sw.Toggle then
+        Log("|cffff0000[RaidDominion]|r El spammer de banda no está disponible.")
+        return
+    end
+    pcall(sw.Toggle, sw)
+end
+
+-- Clic izquierdo en el icono "Spammer de reglas": abre/oculta su ventana (el
+-- icono existe en la barra SOLO mientras el spam de reglas está activo).
+local function HandleRulesSpamWindow()
+    local win = RD.ui and RD.ui.rulesSpammerWindow
+    if not win or not win.Toggle then
+        Log("|cffff0000[RaidDominion]|r El spammer de reglas no está disponible.")
+        return
+    end
+    pcall(win.Toggle, win)
+end
+
 -- ============ Registro de acciones ============
 local Handlers = {
     ActionBarRaidMode          = HandleRaidMode,
@@ -708,6 +739,8 @@ local Handlers = {
     ActionBarPlayer            = HandlePlayerSelf,
     ActionBarPlayerFinder      = HandlePlayerFinder,
     ActionBarConfig            = HandleConfig,
+    ActionBarSpamWindow        = HandleSpamWindow,
+    ActionBarRulesSpamWindow   = HandleRulesSpamWindow,
 }
 for actionId, handler in pairs(Handlers) do
     if RD.MenuActions and RD.MenuActions.Register then

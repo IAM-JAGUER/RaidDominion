@@ -52,6 +52,25 @@ local function RunMigrations(db, defaults)
     end
 end
 
+-- Listas de contenido con valores por defecto propios (RD_Data_DefaultLists).
+-- Viven FUERA de DEFAULT_CONFIG a propósito: DEFAULT_CONFIG se
+-- fusiona en cada Load con MergeTable, que recrea los índices de array
+-- ausentes (un usuario que borra o vacía entradas las vería reaparecer en cada
+-- login) y alimenta el "Reiniciar" de cada pestaña (documentado como "vaciar").
+-- Se aplican SOLO a targets recién creados o recién vaciados: DB nueva y
+-- "Restablecer valores por defecto". Los consumidores SIEMPRE copian
+-- (DeepCopy): RD.data.defaultLists nunca se muta.
+local DEFAULT_LIST_KEYS = { "roles", "abilities", "buffs", "auras", "rules" }
+local function ApplyDefaultLists(target)
+    local lists = RD.data and RD.data.defaultLists
+    if type(lists) ~= "table" then return end
+    for _, key in ipairs(DEFAULT_LIST_KEYS) do
+        if type(lists[key]) == "table" then
+            target[key] = DeepCopy(lists[key])
+        end
+    end
+end
+
 -- Carga la DB y fusiona con los valores por defecto. Idempotente: las
 -- migraciones solo corren una vez por sesión (RD_Init la invoca en ADDON_LOADED
 -- y de nuevo en PLAYER_LOGIN; la segunda llamada es un no-op).
@@ -62,6 +81,11 @@ function Config:Load()
 
     if not RaidDominionDB then
         RaidDominionDB = DeepCopy(DEFAULTS)
+        -- DB nueva: arranca ya con las listas por defecto del addon (roles,
+        -- habilidades, buffs y auras de RD_Data_DefaultLists). Con DB previa NO
+        -- se toca nada aquí: de las listas vacías se encarga la siembra de
+        -- migraciones (una sola vez, flag _listsSeeded).
+        ApplyDefaultLists(RaidDominionDB)
     else
         MergeTable(RaidDominionDB, DEFAULTS)
         RunMigrations(RaidDominionDB, DEFAULTS)
@@ -214,10 +238,14 @@ function Config:Set(key, value)
     end
 end
 
--- Restaura los valores por defecto
+-- Restaura los valores por defecto. Las listas de contenido (roles,
+-- habilidades, buffs, auras y reglas) se restauran a las incluidas por defecto
+-- (RD_Data_DefaultLists), no vacías: DEFAULT_CONFIG las mantiene vacías a
+-- propósito (ver ApplyDefaultLists).
 function Config:ResetToDefaults()
     RaidDominionDB = DeepCopy(DEFAULTS)
     db = RaidDominionDB
+    ApplyDefaultLists(db)
     if RD.events and RD.events.Publish then
         RD.events:Publish("CONFIG_RESET")
     end

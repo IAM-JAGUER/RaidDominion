@@ -60,11 +60,13 @@ function Characters:RegisterCurrent()
     if not info then
         info = {
             firstSeen = now,
-            version = RD.constants and RD.constants.VERSION or "",
         }
         container[currentKey] = info
     end
 
+    -- Mantiene la versión del addon actual en cada login para que el portal
+    -- pueda distinguir registros generados por esquemas anteriores.
+    info.version       = RD.constants and RD.constants.VERSION or ""
     info.name          = UnitName("player") or "?"
     info.realm         = GetRealmName() or "?"
     info.className     = className or "?"

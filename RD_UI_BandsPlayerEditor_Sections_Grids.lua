@@ -15,7 +15,12 @@
               (comportamiento nativo de WoW: ChatEdit_InsertLink), sin depender
               del canal configurado del addon; el panel inferior muestra el ítem
               seleccionado con texto compacto y un CHECK de seguimiento del
-              objetivo para el tooltip de "Jugador".
+              objetivo para el tooltip de "Jugador". El NOMBRE del ítem equipado
+              y la línea de OBJETIVO del panel son CLICABLES como un enlace
+              (Button invisible ajustado al texto: en 3.3.5a un FontString no
+              recibe ratón): clic = cuadro de información del ítem (SetItemRef);
+              Mayús+clic = insertar en el chat y Ctrl+clic = probador (nativo de
+              SetItemRef); hover = tooltip del ítem y resalte del texto.
               También hospeda los HELPERS COMPARTIDOS de ambas secciones de
               rejilla (equip y monedas) y el despachador: la sección "monedas"
               vive en RD_UI_BandsPlayerEditor_Sections_Currencies.lua y se
@@ -551,6 +556,71 @@ local function BuildEquip(container, ed, width, height)
     track:Hide()
     Track(container, track)
 
+    -- Enlaces del panel: en 3.3.5a un FontString no recibe eventos de ratón (ni
+    -- Blizzard usa scripts en FontString), así que el área clicable se resuelve
+    -- con un Button INVISIBLE superpuesto al texto (misma técnica que las celdas
+    -- de la rejilla): ajustado al ancho REAL del texto visible y oculto cuando
+    -- no hay enlace resoluble. Clic = cuadro de información del ítem
+    -- (SetItemRef, como un enlace del chat: Mayús+clic = insertar en el chat);
+    -- hover = tooltip del ítem + resalte.
+    local function MakeLinkHit(text)
+        local hit = CreateFrame("Button", UniqueName("EqLink"), panel)
+        hit:EnableMouse(true)
+        hit:RegisterForClicks("LeftButtonUp")
+        hit:SetPoint("TOPLEFT", text, "TOPLEFT", 0, 0)
+        hit:SetSize(1, 14)
+        hit:Hide()
+        hit:SetScript("OnClick", function(self)
+            local link = self.rdLink
+            if not link or not _G.SetItemRef then return end
+            -- Igual que el chat: primer argumento = dato del enlace (|H...|h).
+            -- SetItemRef ya resuelve los modificadores de forma nativa
+            -- (ItemRef.lua: IsModifiedClick → HandleModifiedItemClick): clic
+            -- normal abre el cuadro de información, Mayús+clic lo inserta en el
+            -- chat y Ctrl+clic abre el probador, como cualquier enlace.
+            _G.SetItemRef(self.rdLinkData or link, link, "LeftButton")
+        end)
+        hit:SetScript("OnEnter", function(self)
+            if not self.rdLink then return end
+            local c = self.rdColor
+            if c and text.SetTextColor then text:SetTextColor(1, 1, 1) end
+            if RD.UIUtils and RD.UIUtils.TooltipsEnabled and not RD.UIUtils.TooltipsEnabled() then return end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetHyperlink(self.rdLinkData or self.rdLink)
+            GameTooltip:Show()
+        end)
+        hit:SetScript("OnLeave", function(self)
+            if GameTooltip then GameTooltip:Hide() end
+            local c = self.rdColor
+            if c and text.SetTextColor then text:SetTextColor(c[1], c[2], c[3]) end
+        end)
+        Track(container, hit)
+        return hit
+    end
+    local eqHit = MakeLinkHit(line)
+    local goalHit = MakeLinkHit(status)
+
+    -- Ajusta el overlay al texto visible de `text` (ancho real, entero: §6) y lo
+    -- muestra; lo oculta si no hay enlace resoluble (p.ej. objetivo legacy sin
+    -- itemID ni link). `color` queda guardado para restaurarlo al salir del hover.
+    local function ShowLinkHit(hit, text, cell, color)
+        local link = cell and CellLink(cell) or nil
+        if not link then
+            hit.rdLink = nil
+            hit.rdLinkData = nil
+            hit:Hide()
+            return
+        end
+        hit.rdLink = link
+        hit.rdLinkData = link:match("|H(.-)|h") or link
+        hit.rdColor = color
+        local w = text.GetStringWidth and text:GetStringWidth() or 0
+        w = math.floor((tonumber(w) or 0) + 0.5)
+        if w < 1 then w = 1 end
+        hit:SetSize(w, 14)
+        hit:Show()
+    end
+
     -- Fila de ACCIÓN "agregar objetivo" (campo de enlace + Registrar/Quitar).
     local search = (widgets and widgets.CreateItemSearch) and widgets:CreateItemSearch(panel, {
         width = 160,
@@ -611,6 +681,10 @@ local function BuildEquip(container, ed, width, height)
             line:SetTextColor(0.7, 0.7, 0.7)
             line:SetText("Clic en un ítem de la rejilla para gestionar su objetivo.")
             status:SetText("")
+            eqHit.rdLink = nil
+            eqHit:Hide()
+            goalHit.rdLink = nil
+            goalHit:Hide()
             track.rdItemID = nil
             track.rdName = nil
             track:Hide()
@@ -627,9 +701,12 @@ local function BuildEquip(container, ed, width, height)
             local qc = QualityColor(equipped.quality)
             line:SetTextColor(qc[1], qc[2], qc[3])
             line:SetText(TruncateToWidth(equipped.name .. (equipped.ilvl and ("  (iLvL " .. equipped.ilvl .. ")") or ""), lineW, 11))
+            ShowLinkHit(eqHit, line, equipped, qc)
         else
             line:SetTextColor(0.7, 0.7, 0.7)
             line:SetText("Sin ítem equipado en este slot.")
+            eqHit.rdLink = nil
+            eqHit:Hide()
         end
 
         if goal then
@@ -641,10 +718,15 @@ local function BuildEquip(container, ed, width, height)
             if equipped and equipped.name == goalName then
                 status:SetTextColor(0.7, 0.7, 0.7)
                 status:SetText(goal.done and "Objetivo HECHO ✓" or "Objetivo fijado ✓")
+                -- Sin nombre propio en esta línea: sin enlace (el nombre ya está
+                -- en la línea de equipado, que tiene su propio overlay).
+                goalHit.rdLink = nil
+                goalHit:Hide()
             else
                 local qc = QualityColor(goal.quality)
                 status:SetTextColor(qc[1], qc[2], qc[3])
                 status:SetText(TruncateToWidth("Objetivo: " .. goalName .. (goal.done and " · HECHO" or ""), statusW, 11))
+                ShowLinkHit(goalHit, status, goal, qc)
             end
             -- Check de seguimiento: visible solo si el objetivo tiene itemID
             -- (los legacy sin ID no se pueden seguir por ID) y sincronizado con
@@ -663,6 +745,8 @@ local function BuildEquip(container, ed, width, height)
         else
             status:SetTextColor(0.7, 0.7, 0.7)
             status:SetText("Sin objetivo.")
+            goalHit.rdLink = nil
+            goalHit:Hide()
             track.rdItemID = nil
             track.rdName = nil
             track:Hide()

@@ -96,8 +96,11 @@ local function Classify(active)
     return yes, no, pending, afk, offline
 end
 
--- Anuncia el resumen por el canal configurado. El título va envuelto en
+-- Anuncia el resumen SOLO al líder (local). El título va envuelto en
 -- "= ... =" (como reglas/mecánicas) y las líneas de detalle van sueltas.
+-- Se envía por SendSystemMessage (chat local del líder), NUNCA por el canal
+-- configurado: el resumen es privado del líder y así no se difunde a la banda;
+-- además evita que, tras salir del grupo, GetChannel() caiga a SAY y lo publique.
 local function SendSummary(active)
     local mm = RD.modules and RD.modules.messageManager
     if not mm then return end
@@ -117,7 +120,9 @@ local function SendSummary(active)
     AddLine("Sin responder", pending)
     AddLine("AFK", afk)
     AddLine("Desconectados", offline)
-    mm:SendSequence(parts, 0.1, mm:GetChannel())
+    for _, line in ipairs(parts) do
+        mm:SendSystemMessage(line)
+    end
 end
 
 -- Inicia el check. `seconds` > 0 lanza el check con cuenta regresiva de chat
@@ -151,13 +156,17 @@ function ReadyCheck:Start(seconds)
     if playerName ~= "" then self.active.confirmed[playerName] = "yes" end
 
     if mm then
+        -- Canal del check FIJADO al inicio (estando en grupo): los anuncios y
+        -- ticks van SIEMPRE a este canal, nunca se re-resuelven (si se saliera
+        -- del grupo, GetChannel() caería a SAY y difundiría al chat público).
+        local checkChannel = mm:GetChannel()
         -- Primer anuncio en t=0 (restaurado) + conteo ceñido al contador:
         -- 9s..., 5s... → ¡RESPONDAN AHORA!, 3s..., 2s..., 1s... El "¡RESPONDAN
         -- AHORA!" va justo tras el tick de 5s cuando existe; si no, cierra el
         -- conteo en t=N. Al final queda solo el resumen. En el modo inmediato
         -- (0s, nativo) no hay ticks: el juego cierra con sus propios eventos.
         mm:SendMessage(string.format((immediate and "= Ready check lanzado por %s (inmediato) =") or "= Ready check lanzado por %s (%ds) =",
-            (playerName ~= "" and strupper(playerName)) or "?", n))
+            (playerName ~= "" and strupper(playerName)) or "?", n), checkChannel)
         local plan = {}
         local function At(second, text)
             plan[#plan + 1] = { second = second, text = text }
@@ -189,8 +198,10 @@ function ReadyCheck:Start(seconds)
         local active = self.active
         for _, p in ipairs(plan) do
             mm:Schedule(p.second, function()
-                if ReadyCheck.active == active then
-                    mm:SendMessage(p.text, mm:GetChannel())
+                -- Solo si el check sigue siendo el mismo Y seguimos en grupo:
+                -- tras abandonar el grupo no se difunden ticks al chat público.
+                if ReadyCheck.active == active and (InRaid() or InParty()) then
+                    mm:SendMessage(p.text, checkChannel)
                 end
             end)
         end
@@ -220,7 +231,13 @@ function ReadyCheck:Cancel()
     if not self.active then return end
     self.active = nil
     if RD.messageManager then
-        RD.messageManager:SendMessage("= Check cancelado =")
+        -- Aviso público solo si seguimos en grupo; fuera del grupo, local
+        -- (evita que GetChannel() caiga a SAY y difunda al chat público).
+        if InRaid() or InParty() then
+            RD.messageManager:SendMessage("= Check cancelado =")
+        else
+            RD.messageManager:SendSystemMessage("= Check cancelado =")
+        end
     end
 end
 

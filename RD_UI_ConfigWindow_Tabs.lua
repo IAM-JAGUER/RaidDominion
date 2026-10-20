@@ -51,9 +51,9 @@ local GRIP_GAP = 4               -- separación grip-chip (grid 4px)
 local GOLD_R, GOLD_G, GOLD_B = unpack((RD.constants and RD.constants.COLORS and RD.constants.COLORS.GOLD) or { 1, 0.82, 0 })
 
 -- Ítems del menú flotante (MainFrameOptions) con pestaña propia en el
--- CONFIG_SCHEMA, en el orden POR DEFECTO = orden del esquema (la fila superior):
--- bands, abilities, roles, buffs, auras, mechanics, rules. Es la base sobre la
--- que el usuario reordena y el fallback cuando ui.menu.itemOrder está vacío.
+-- CONFIG_SCHEMA, en el orden FALLBACK = orden del esquema. Es la base sobre la
+-- que el usuario reordena cuando ui.menu.itemOrder está vacío; el default de
+-- fábrica vive en DEFAULT_CONFIG (orden de la cuenta IAMM).
 function ConfigWindow:ReorderableMenuIds()
     local mf = RD.ui and RD.ui.menuFactory
     if mf and mf.DefaultMenuOrder then return mf:DefaultMenuOrder() end
@@ -209,7 +209,7 @@ function ConfigWindow:BuildTabRow(frame)
 
         if cell.reorderable then
             local grip = widgets:CreateGrip(rowFrame, GRIP_SIZE, function()
-                return "Arrastra para mover '" .. tostring(tab.title or tab.id) .. "' (reordena la fila y el menú flotante)."
+                return "Arrastra para mover '" .. tostring(tab.title or tab.id) .. "' (reordena el elemento en el menú flotante)."
             end)
             cell.grip = grip
             tabData.grip = grip

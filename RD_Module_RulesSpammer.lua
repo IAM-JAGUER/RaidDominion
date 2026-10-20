@@ -11,7 +11,7 @@
         - RD.modules.rulesSpammer:GetRules() / GetSelectedItem()
         - RD.modules.rulesSpammer:GetSettings() / UpdateSettings(partial)
         - RD.modules.rulesSpammer:BuildPreview(item) / BuildLine(item) / GetLength(item)
-        - RD.modules.rulesSpammer:CanStart() / IsActive() / TimeLeft()
+        - RD.modules.rulesSpammer:CanStart() / CanDeliver() / IsActive() / TimeLeft()
         - RD.modules.rulesSpammer:Start() / Stop() / Toggle()
         - RD.modules.rulesSpammer:SendItem(item) / SendItemToChannel(item, ch) / SendNext()
     EVENTOS: Ninguno directo.
@@ -62,11 +62,23 @@ local function WrapTitle(title)
     return "= " .. title .. " ="
 end
 
--- true si el mensaje puede enviarse a algún canal marcado: cualquier canal
--- admite mensajes largos (SendMessage trocea por palabras con un retraso),
+-- true si hay al menos un canal marcado. El arranque del bucle NO depende de
+-- que el mensaje quepa: los canales de línea única (Posada e índices 1-9)
+-- omiten la regla si supera 255 caracteres, pero el bucle puede iniciarse y
+-- enviar al resto de canales (paridad con el spammer de banda).
+local function HasChannel(channels)
+    for _, checked in pairs(channels or {}) do
+        if checked then return true end
+    end
+    return false
+end
+
+-- true si el mensaje puede ENTREGARSE a algún canal marcado: cualquier canal
+-- normal admite mensajes largos (SendMessage trocea por palabras con retraso),
 -- salvo los de línea única (INN y 1-9), que limitan a UN mensaje cada ~10 s y
--- por tanto exigen que la línea única quepa en 255 caracteres.
-local function CanSend(channels, len)
+-- por tanto exigen que la línea única quepa en 255 caracteres. Se usa solo para
+-- el indicador de longitud (rojo si no hay forma de entregarlo).
+local function CanDeliver(channels, len)
     local any = false
     local onlySingleLine = true
     for ch, checked in pairs(channels or {}) do
@@ -292,14 +304,23 @@ function RulesSpammer:SendNext()
     if win and win.OnTick then win:OnTick(1, { item }) end
 end
 
--- true si la regla seleccionada puede enviarse: mensaje no vacío y al menos un
--- canal marcado que lo admita (los canales de línea única —Posada e índices
--- 1-9— exigen que la línea quepa en 255 caracteres).
+-- true si la regla seleccionada puede iniciar el bucle: mensaje no vacío y al
+-- menos un canal marcado (sin importar la longitud; el envío concreto decide si
+-- cabe en los canales de línea única).
 function RulesSpammer:CanStart()
     local item = self:GetSelectedItem()
     if not item then return false end
     if self:BuildPreview(item) == "" then return false end
-    return CanSend(self:GetSettings().channels, CharCount(self:BuildLine(item)))
+    return HasChannel(self:GetSettings().channels)
+end
+
+-- true si la regla seleccionada puede ENTREGARSE de verdad a algún canal
+-- marcado (para el indicador de longitud: rojo cuando solo hay canales de línea
+-- única y la línea supera 255).
+function RulesSpammer:CanDeliver()
+    local item = self:GetSelectedItem()
+    if not item then return false end
+    return CanDeliver(self:GetSettings().channels, CharCount(self:BuildLine(item)))
 end
 
 function RulesSpammer:Start()

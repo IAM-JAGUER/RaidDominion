@@ -267,6 +267,10 @@ local function OnEnter(self)
     if instances and instances.TooltipLines then
         AddBlock("Seguimiento de instancias:", instances:TooltipLines(), 12)
     end
+    local notes = RD.utils and RD.utils.playerNotes
+    if notes and notes.TrackedNoteLines then
+        AddBlock("Nota en seguimiento:", notes:TrackedNoteLines(), 10)
+    end
 
     GameTooltip:AddLine("|cff00ff00Clic:|r Abrir/cerrar el menú flotante", 1, 1, 1, true)
     GameTooltip:AddLine("|cff00ff00Clic derecho:|r Menú contextual", 1, 1, 1, true)

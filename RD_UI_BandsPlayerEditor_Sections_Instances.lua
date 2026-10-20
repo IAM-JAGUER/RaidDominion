@@ -13,17 +13,13 @@
               alimenta los tooltips del botón "Jugador" (TrackedLines) y del
               botón de minimapa (TooltipLines): ambos se OMITEN si el check está
               apagado o no hay instancias.
-              El dato viene EN VIVO de GetSavedInstanceInfo (no se persiste;
-              contrato SV del portal sin cambios). ROBUSTO a la semántica del
-              campo expires: en el API estándar 3.3.5a es una ÉPOCA absoluta;
-              en este servidor (UltimoWoW, como lee SavedInstances) es un OFFSET
-              relativo de segundos restantes — se detecta y normaliza. La cuenta
-              atrás usa GetServerTime() (fallback time()), inmune a la zona
-              horaria del SO. La enumeración es por GetSavedInstanceInfo hasta
-              nil (tope de seguridad), NO por GetNumSavedInstances: el contador
-              de la cabecera coincide siempre con la lista visible.
-              Refresco ante RAID_INSTANCE_INFO / PLAYER_ENTERING_WORLD si la
-              sección está abierta (patrón RefreshOpenSection). Solo uno mismo.
+              La lectura EN VIVO y la normalización del campo `expires` viven en
+              RD_Utils_Instances (módulo puro compartido con los tooltips y el
+              snapshot del registro); esta sección solo decide la PRESENTACIÓN.
+              El snapshot que viaja al portal lo proyecta Registry:Export
+              (AGENTS.md §14). Refresco ante RAID_INSTANCE_INFO /
+              PLAYER_ENTERING_WORLD si la sección está abierta (patrón
+              RefreshOpenSection). Solo uno mismo.
               Usa los helpers compartidos de RD_UI_BandsPlayerEditor_Sections_Grids
               (que DEBE cargarse antes en el .toc) vía RD.ui.playerEditorSectionsGrids.Helpers.
     API PÚBLICA:
@@ -80,83 +76,26 @@ local TruncateToWidth = H().TruncateToWidth
     end
 local AddButtonTooltip = (RD.UIUtils and RD.UIUtils.AddButtonTooltip) or function() end
 
--- Momento de referencia "ahora": hora del SERVIDOR (época absoluta; inmune a la
--- zona horaria del SO, que era la fuente del día equivocado con date() local).
+-- Util compartido (RD_Utils_Instances). Carga DESPUÉS de esta UI en el .toc,
+-- por eso se resuelve en tiempo de llamada (mismo patrón que la sección
+-- Monedas con RD.utils.currencies).
+local function InUtils()
+    return RD.utils and RD.utils.instances
+end
+
+-- Momento de referencia "ahora" (hora del servidor; ver RD_Utils_Instances).
 local function Now()
-    if GetServerTime then
-        local t = GetServerTime()
-        if type(t) == "number" and t > 0 then return t end
-    end
+    local util = InUtils()
+    if util then return util:Now() end
     return time()
 end
 
--- El campo `expires` de GetSavedInstanceInfo varía según el cliente/servidor:
--- en el API estándar 3.3.5a es una ÉPOCA absoluta (segundos Unix); en este
--- servidor (UltimoWoW) es un OFFSET relativo de segundos restantes (SavedInstances
--- hace `expires + time()`). Se DETECTA el formato y se devuelven los segundos
--- restantes hasta el reinicio, o nil si no hay reloj válido (expires 0,
--- negativo o ya pasado) — elimina el bug de la "época 0" y las fechas sin
--- sentido.
-local function ResolveReset(expires, now)
-    if type(expires) ~= "number" or expires <= 0 then return nil end
-    local remaining
-    if expires > 1e8 then
-        -- Época absoluta real (>= ~1973): el reinicio menos el ahora.
-        remaining = expires - now
-    else
-        -- Offset relativo: el reinicio está a `expires` segundos.
-        remaining = expires
-    end
-    if remaining <= 0 then return nil end
-    return remaining
-end
-
--- Etiqueta corta de dificultad: "25H" / "10" / "5H" / "40" / "N". PRIORIZA el
--- diffname localizado del API (este servidor lo devuelve), derivando el tamaño
--- (5/10/25/40) y el sufijo heroico; si no hay diffname, usa un mapa
--- CONSERVADOR de diff+raid solo con valores inequívocos (no pintar un tamaño
--- de banda erróneo). nil => sin etiqueta.
-local RAID_DIFF_FALLBACK = { [3] = "25", [5] = "25H", [6] = "40", [9] = "40" }
-local DUNGEON_DIFF_FALLBACK = { [1] = "5" }
-local function DifficultyTag(diff, raid, diffname)
-    if diffname and diffname ~= "" then
-        local n = diffname:match("(%d+)")
-        local hero = (diffname:lower():find("hero", 1, true) ~= nil)
-        if n then
-            return n .. (hero and "H" or "")
-        end
-        if hero then return "H" end
-        if diffname:find("Normal", 1, true) or diffname:find("Normale", 1, true) then
-            return "N"
-        end
-    end
-    if type(diff) == "number" then
-        if raid then
-            local t = RAID_DIFF_FALLBACK[diff]
-            if t then return t end
-        end
-        local t = DUNGEON_DIFF_FALLBACK[diff]
-        if t then return t end
-    end
-    return nil
-end
-
--- Texto de cuenta atrás: "2d 4h" / "5h 20m" / "12m" / "ahora".
+-- Texto de cuenta atrás: "2d 4h" / "5h 20m" / "12m" / "ahora". API pública
+-- conservada: delega en el util compartido.
 function Instances.FormatRemaining(secs)
-    secs = math.floor(tonumber(secs) or 0)
-    if secs <= 0 then return "ahora" end
-    local days = math.floor(secs / 86400)
-    local hours = math.floor((secs % 86400) / 3600)
-    local mins = math.floor((secs % 3600) / 60)
-    if days > 0 then
-        if hours > 0 then return string.format("%dd %dh", days, hours) end
-        return string.format("%dd", days)
-    end
-    if hours > 0 then
-        if mins > 0 then return string.format("%dh %dm", hours, mins) end
-        return string.format("%dh", hours)
-    end
-    return string.format("%dm", math.max(1, mins))
+    local util = InUtils()
+    if util then return util:FormatRemaining(secs) end
+    return "ahora"
 end
 
 -- Color de la meta por urgencia (segundos restantes).
@@ -206,50 +145,18 @@ local function RowText(e)
     return label
 end
 
--- Tope de seguridad para la enumeración (el API termina con nil; el cap evita
--- bucear sin límite en clientes raros).
-local MAX_INSTANCES = 60
-
--- Enumeración de TODAS las instancias guardadas (con y sin reloj): se lee
--- GetSavedInstanceInfo hasta que devuelva nil, NO GetNumSavedInstances (el
--- contador coincide siempre con la lista). Leemos los 10 retornos de este
--- cliente (diffname y raid incluidos); un cliente estándar de 5 retornos deja
--- los extras en nil y el código los tolera. Compartido por la sección y los
--- tooltips.
+-- Enumeración y separación: delegan en el util compartido (RD_Utils_Instances).
+-- Sin el util (instalación desincronizada) no hay datos que pintar.
 local function CollectEntries(now)
-    local entries = {}
-    for i = 1, MAX_INSTANCES do
-        local name, id, expires, diff, locked, extended, mostsig, raid, players, diffname =
-            GetSavedInstanceInfo(i)
-        if not name or name == "" then break end
-        local rem
-        if locked then
-            rem = ResolveReset(expires, now)
-        end
-        entries[#entries + 1] = {
-            name = name,
-            rem = rem,
-            extended = extended and true or false,
-            tag = DifficultyTag(diff, raid, diffname),
-        }
-    end
-    return entries
+    local util = InUtils()
+    if not util then return {} end
+    return util:Collect(now)
 end
 
--- Separa instancias con reloj pendiente del resto y las ordena: con reloj
--- primero por el más próximo (desempate por nombre; table.sort en Lua 5.1 NO
--- es estable), el resto después por nombre.
 local function SplitEntries(entries)
-    local pending, free = {}, {}
-    for _, e in ipairs(entries) do
-        if e.rem then pending[#pending + 1] = e else free[#free + 1] = e end
-    end
-    table.sort(pending, function(a, b)
-        if a.rem ~= b.rem then return a.rem < b.rem end
-        return a.name < b.name
-    end)
-    table.sort(free, function(a, b) return a.name < b.name end)
-    return pending, free
+    local util = InUtils()
+    if not util then return {}, {} end
+    return util:Split(entries)
 end
 
 -- ---------------------------------------------------------------------------
@@ -282,8 +189,12 @@ end
 -- Geometría (grid 4px; enteros). Interlineado COMPACTO: fila 15px para fuente
 -- de 12px + hueco 2px = 17px por fila (antes 16px de slot + 4px de hueco = 20px
 -- para la MISMA fuente: era el "doble espaciado"). Cabeceras agrupadas.
+-- HEAD_H es el mínimo de la cabecera FIJA: su alto real se calcula en Build
+-- según las líneas que ocupe la etiqueta (con anchos pequeños envuelve a 2) más
+-- HEAD_GAP de aire; sin ese margen la 2ª línea pisaba el título del scroll.
 local HEAD_H = 24           -- cabecera FIJA (check general), fuera del scroll
-local TITLE_H = 18          -- "Instancias guardadas (N)"
+local HEAD_GAP = 12         -- aire mínimo entre la cabecera FIJA y su contenido
+local TITLE_H = 20          -- "Instancias guardadas (N)" (fuente 15px + aire)
 local GROUP_H = 16          -- cabecera de grupo ("Con reinicio (N)" / "Sin reinicio (N)")
 local ROW_H = 15            -- fila de instancia (fuente 12px)
 local ROW_GAP = 2           -- hueco entre filas DENTRO del grupo
@@ -304,11 +215,6 @@ function Instances:Build(container, ed, width, height)
     EnsureEvents()
     local entries = CollectEntries(Now())
 
-    if #entries == 0 then
-        ShowMessage(container, width, "No hay mazmorras ni bandas guardadas.", { 0.7, 0.7, 0.7 })
-        return
-    end
-
     -- ----- Cabecera FIJA (fuera del scroll): check GENERAL de seguimiento -----
     -- El check guarda itemGoals.<key>.instancesTracked y decide si las
     -- instancias aparecen en los tooltips de "Jugador" y del minimapa. El toggle
@@ -319,13 +225,31 @@ function Instances:Build(container, ed, width, height)
     header:SetPoint("TOPLEFT", container, "TOPLEFT", 0, 0)
     Track(container, header)
 
+    local labelText = "Seguimiento: instancias en el tooltip del botón Jugador"
+    local labelW = math.max(40, width - 2 * PAD - TRACK_S - PAD - 8)
     local label = header:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     label:SetJustifyH("LEFT")
     ApplyFontStyle(label, "contentText")
-    label:SetText("Seguimiento: instancias en el tooltip del botón Jugador")
+    label:SetText(labelText)
     label:SetTextColor(0.75, 0.75, 0.75)
     label:SetPoint("TOPLEFT", header, "TOPLEFT", PAD, -6)
-    label:SetWidth(math.max(40, width - 2 * PAD - TRACK_S - PAD - 8))
+    label:SetWidth(labelW)
+
+    -- Alto de la cabecera DINÁMICO (§6.4) con AIRE GARANTIZADO: la etiqueta
+    -- envuelve a 2 líneas con el ancho del editor y su 2ª línea pisaba el título
+    -- del scroll ("Instancias guardadas (N)"). El alto se estima SIEMPRE con la
+    -- heurística de ancho medio (0.55 × tamaño, la misma de TruncateToWidth) y
+    -- se toma el MAYOR entre medición y estimación: GetStringHeight puede
+    -- devolver una sola línea con el layout diferido de 3.3.5a aunque el texto
+    -- acabe envolviendo (era la causa de que el piso continuara). Entre la
+    -- etiqueta y el contenido se reservan HEAD_GAP px de aire (≥ 12 pedidos).
+    local cpl = math.max(1, math.floor(labelW / (12 * 0.55)))
+    local estH = math.max(1, math.ceil(#labelText / cpl)) * 15
+    local measuredH = label.GetStringHeight and label:GetStringHeight() or 0
+    local labelH = math.max(estH, measuredH or 0)
+    local headH = math.max(HEAD_H, 6 + math.floor(labelH + 0.5) + HEAD_GAP)
+    headH = math.ceil(headH / 4) * 4
+    header:SetSize(width, headH)
 
     local track = CreateFrame("CheckButton", UniqueName("InstTrk"), header, "UICheckButtonTemplate")
     track:SetSize(TRACK_S, TRACK_S)
@@ -344,15 +268,32 @@ function Instances:Build(container, ed, width, height)
     end)
     header.rdTrack = track
 
+    -- El check de seguimiento es SIEMPRE visible (para el personaje propio): sin
+    -- instancias guardadas se muestra el aviso bajo la cabecera y NO se arma el
+    -- scroll, pero el usuario ya puede activar/desactivar el seguimiento.
+    if #entries == 0 then
+        local msg = container:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        msg:SetJustifyH("LEFT")
+        ApplyFontStyle(msg, "contentText")
+        msg:SetText("No hay mazmorras ni bandas guardadas.")
+        msg:SetTextColor(0.7, 0.7, 0.7)
+        msg:SetPoint("TOPLEFT", container, "TOPLEFT", PAD, -headH)
+        msg:SetWidth(width - 2 * PAD)
+        msg:SetWordWrap(true)
+        Track(container, msg)
+        container.rdInstanceData = { count = 0, title = "Instancias guardadas (0)", rows = {}, groups = {} }
+        return
+    end
+
     -- ----- Scroll con filas propias (2 columnas: nombre izq + meta der.) -----
-    local scrollH = math.max(40, (height or 300) - HEAD_H)
+    local scrollH = math.max(40, (height or 300) - headH)
     local scroll, content
     if MakeScroll then
-        scroll, content = MakeScroll(container, width, scrollH, HEAD_H, 0)
+        scroll, content = MakeScroll(container, width, scrollH, headH, 0)
     else
         scroll = CreateFrame("ScrollFrame", nil, container)
         scroll:SetSize(width, scrollH)
-        scroll:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -HEAD_H)
+        scroll:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -headH)
         content = CreateFrame("Frame", nil, scroll)
         content:SetWidth(width)
         scroll:SetScrollChild(content)
