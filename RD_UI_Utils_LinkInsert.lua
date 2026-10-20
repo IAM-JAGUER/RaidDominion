@@ -11,6 +11,12 @@
         - UIUtils.DisableLinkInsertion(editBox)  (opt-out de campos numéricos)
         - UIUtils.EnableLinkDisplay(editBox)     (clic sobre enlaces: ver/enviar)
         - UIUtils.FindLinkAtCursor(text, caret)  (detector puro, testable)
+    ENVOLTORIOS DE CHAT: además de ChatEdit_InsertLink, se envuelven una sola
+        vez ChatEdit_GetActiveWindow (devuelve la caja RD enfocada) y se
+        neutralizan ChatEdit_ActivateChat/DeactivateChat sobre cajas RD. Cubre
+        a los addons que insertan enlaces con el patrón "ventana activa +
+        box:Insert" en vez de ChatEdit_InsertLink (p.ej. Carbonite, que tiene
+        registro de misiones propio). Ver la nota larga de abajo.
     ORDEN: cargar DESPUÉS de RD_UI_Utils.lua y ANTES de cualquier widget que
            cree EditBoxes (ver RaidDominion.toc).
     EVENTOS: Ninguno.
@@ -22,21 +28,37 @@ local UIUtils = RD.UIUtils or {}
 --[[
     Habilita en un EditBox la inserción de enlaces del juego (shift-clic de
     ítems, hechizos/profesiones, misiones y logros), igual que el cuadro de
-    chat y sin botones extra: el propio EditBox los acepta. En 3.3.5a TODAS
-    las vías pasan por el global Lua ChatEdit_InsertLink: los ítems pulsados
-    con shift en bolsas/banco/mercader/personaje llegan vía
-    HandleModifiedItemClick (definido en FrameXML/ItemButtonTemplate.lua, que
-    llama a ChatEdit_InsertLink), y misiones/logros/hechizos lo llaman
-    directamente. Se envuelve UNA sola vez y, si alguno de los EditBoxes
-    registrados está visible y enfocado, se inserta el enlace en el cursor
-    (con un espacio previo, como hace el chat, para que sea parseable al
-    reenviarlo).
+    chat y sin botones extra: el propio EditBox los acepta. La vía CLÁSICA en
+    3.3.5a es el global Lua ChatEdit_InsertLink: los ítems pulsados con shift
+    en bolsas/banco/mercader/personaje llegan vía HandleModifiedItemClick
+    (definido en FrameXML/ItemButtonTemplate.lua, que llama a
+    ChatEdit_InsertLink), y misiones/logros/hechizos del registro por defecto
+    lo llaman directamente. Se envuelve UNA sola vez y, si alguno de los
+    EditBoxes registrados está visible y enfocado, se inserta el enlace en el
+    cursor (con un espacio previo, como hace el chat, para que sea parseable
+    al reenviarlo).
 
     IMPORTANTE: nunca se toca ACTIVE_CHAT_EDIT_BOX con una caja del addon.
     ChatEdit_ActivateChat/DeactivateChat asumen una caja de chat REAL (header,
     focusLeft/Mid/Right, estrata): al desactivar una caja RD la ocultarían
     (estilo clásico), le borrarían el texto (estilo IM) o darían error, y
     rompería abrir el chat con Intro.
+
+    SEGUNDA VÍA (addons que NO usan ChatEdit_InsertLink): Carbonite tiene
+    registro de misiones propio y su shift-clic hace, literalmente,
+    `local box = ChatEdit_GetActiveWindow(); if box then box:Insert(enlace) end`;
+    si no hay caja activa ni siquiera inserta (alterna el seguimiento de la
+    misión). Por eso, además de ChatEdit_InsertLink, se envuelve
+    ChatEdit_GetActiveWindow: con una caja RD visible y enfocada devuelve ESA
+    caja (peticiones del patrón "ventana activa + Insert" llegan al campo), y
+    sin foco RD delega en el original. El foco es exclusivo del cliente, así
+    que nunca compite con el chat real. Como corolario, ChatEdit_ActivateChat,
+    DeactivateChat y los handlers OnEnterPressed/OnEscapePressed de chat
+    ignoran cajas RD: ningún addon puede arrastrarlas al ciclo de vida del chat
+    (ocultarlas, limpiarlas o enviar su texto). Efecto colateral esperado: los
+    addons que interpretan GetActiveWindow como "hay chat abierto" ven la caja
+    RD mientras ésta tiene el foco (p.ej. Carbonite pausa su cola de envío);
+    se reanuda al perder el foco.
 
     El auto-registro es CENTRAL: el CreateFrame del addon se envuelve una sola
     vez y todo EditBox cuya propiedad sea del addon (nombre "RD*"/"RaidDominion*"
@@ -47,6 +69,9 @@ local UIUtils = RD.UIUtils or {}
 ]]
 local linkBoxes = {}
 local linkHookInstalled = false
+-- Referencia original de ChatEdit_GetActiveWindow. EnableLinkDisplay la usa
+-- para resolver el chat REAL sin rebotar en el envoltorio de más abajo.
+local origGetActiveWindow = _G.ChatEdit_GetActiveWindow
 
 local function IsNumericBox(box)
     if not (box and box.GetNumeric) then return false end
@@ -64,13 +89,17 @@ end
 
 local function LinkBoxReady(box)
     if not (box and box.IsShown and box.HasFocus) then return false end
-    -- Métodos de widget con ':' (en WoW hay que pasar el frame como primer
-    -- argumento; `.IsShown()` sin argumentos da "used '.' instead of ':'").
-    if not LinkBoxAllowed(box) then return false end
-    return box:IsShown() and box:HasFocus()
+    -- Comprobaciones baratas PRIMERO: GetActiveWindow se consulta en ruta
+    -- caliente (addons como Carbonite lo hacen por OnUpdate) y la mayoría de
+    -- las cajas no tienen el foco, así que el pcall de GetNumeric queda solo
+    -- para la caja candidata.
+    if box.RD_linkInsertionDisabled then return false end
+    if not box:IsShown() or not box:HasFocus() then return false end
+    return LinkBoxAllowed(box)
 end
 
 local function FocusedLinkBox()
+    if not next(linkBoxes) then return nil end
     for box in pairs(linkBoxes) do
         if LinkBoxReady(box) then
             return box
@@ -173,11 +202,13 @@ function UIUtils.EnableLinkDisplay(editBox)
         if not link then return end
         if _G.IsModifiedClick and _G.IsModifiedClick("CHATLINK") then
             -- Shift-clic: enviar el enlace al chat, como es estándar. Se usa la
-            -- ventana de chat activa si existe; si no (el clic en la nota
-            -- desactivó el chat), se abre el campo de chat de destino
-            -- (ChatEdit_ChooseBoxForSend: por defecto el marco de siempre) y se
-            -- inserta ahí. Jamás en una caja RD.
-            local target = _G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow()
+            -- ventana de chat activa REAL (original de ChatEdit_GetActiveWindow)
+            -- si existe; si no (el clic en la nota desactivó el chat), se abre
+            -- el campo de chat de destino (ChatEdit_ChooseBoxForSend: por
+            -- defecto el marco de siempre) y se inserta ahí. ChooseBoxForSend
+            -- NO consulta GetActiveWindow en 3.3.5a (usa ACTIVE/LAST_ACTIVE),
+            -- así que no rebota en la caja RD. Jamás se activa una caja RD.
+            local target = origGetActiveWindow and origGetActiveWindow()
             if not target or target.RD_linkInsertionRegistered then
                 target = _G.ChatEdit_ChooseBoxForSend and _G.ChatEdit_ChooseBoxForSend()
             end
@@ -203,6 +234,52 @@ function UIUtils.EnableLinkDisplay(editBox)
         self:SetCursorPosition(endlink)
     end)
     return true
+end
+
+-- Envoltorios de las APIs de ciclo de vida del chat. Ver la nota del
+-- encabezado: los addons que insertan enlaces con "ChatEdit_GetActiveWindow()
+-- + box:Insert()" (Carbonite) deben encontrar la caja RD enfocada; y ninguna
+-- caja RD debe pasar por ActivateChat/DeactivateChat (asumen una caja de chat
+-- real y la ocultarían o limpiarían). Sin caja RD enfocada todo es passthrough.
+do
+    if origGetActiveWindow then
+        _G.ChatEdit_GetActiveWindow = function()
+            local box = FocusedLinkBox()
+            if box then return box end
+            return origGetActiveWindow()
+        end
+    end
+    local origActivateChat = _G.ChatEdit_ActivateChat
+    if origActivateChat then
+        _G.ChatEdit_ActivateChat = function(box, ...)
+            if box and box.RD_linkInsertionRegistered then return end
+            return origActivateChat(box, ...)
+        end
+    end
+    local origDeactivateChat = _G.ChatEdit_DeactivateChat
+    if origDeactivateChat then
+        _G.ChatEdit_DeactivateChat = function(box, ...)
+            if box and box.RD_linkInsertionRegistered then return end
+            return origDeactivateChat(box, ...)
+        end
+    end
+    -- Handlers del chat que terceros invocan pasando la ventana activa
+    -- (p.ej. Prat con alt-clic: ChatEdit_OnEscapePressed(GetActiveWindow())):
+    -- sobre una caja RD los ignoramos para que no la vacíen, oculten o envíen.
+    local origEscapePressed = _G.ChatEdit_OnEscapePressed
+    if origEscapePressed then
+        _G.ChatEdit_OnEscapePressed = function(box, ...)
+            if box and box.RD_linkInsertionRegistered then return end
+            return origEscapePressed(box, ...)
+        end
+    end
+    local origEnterPressed = _G.ChatEdit_OnEnterPressed
+    if origEnterPressed then
+        _G.ChatEdit_OnEnterPressed = function(box, ...)
+            if box and box.RD_linkInsertionRegistered then return end
+            return origEnterPressed(box, ...)
+        end
+    end
 end
 
 -- Auto-registro central de la inserción de enlaces (ver EnableLinkInsertion).

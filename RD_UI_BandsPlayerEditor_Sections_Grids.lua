@@ -112,6 +112,12 @@ local function CleanExtras(container)
         -- sin limpiarla, cada rebuild acumulaba una barra visible duplicada.
         if extra.scrollBar and extra.scrollBar.Hide then extra.scrollBar:Hide() end
         if extra.GetObjectType and extra:GetObjectType() ~= "FontString" then
+            -- Un EditBox descartado sale del registro de enlaces para que
+            -- FocusedLinkBox no recorra cajas muertas (ruta caliente).
+            if extra:GetObjectType() == "EditBox"
+                and RD.UIUtils and RD.UIUtils.DisableLinkInsertion then
+                RD.UIUtils.DisableLinkInsertion(extra)
+            end
             extra:SetParent(nil)
         end
         if extra.scrollBar and extra.scrollBar.SetParent then extra.scrollBar:SetParent(nil) end

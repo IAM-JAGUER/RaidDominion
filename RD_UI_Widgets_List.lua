@@ -137,6 +137,13 @@ function Widgets:CreateList(parent, field, onChange)
                     local nb = dead.nameBox
                     if nb and nb.ClearFocus then nb:ClearFocus() end
                     if dead.nameBox then dead.nameBox:SetAutoFocus(false) end
+                    -- La fila se descarta (no se recicla): saca su EditBox del
+                    -- registro de enlaces para que FocusedLinkBox no recorra
+                    -- cajas muertas en cada consulta (GetActiveWindow es ruta
+                    -- caliente para addons como Carbonite).
+                    if nb and RD.UIUtils and RD.UIUtils.DisableLinkInsertion then
+                        RD.UIUtils.DisableLinkInsertion(nb)
+                    end
                     if dead.EnableMouse then dead:EnableMouse(false) end
                     dead:Hide()
                     dead:SetParent(nil)

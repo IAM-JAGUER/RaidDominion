@@ -219,6 +219,11 @@ function Widgets:CreateBands(parent, field, onChange)
             if r and r.Hide then
                 local ok, err = pcall(function(dead)
                     if dead.nameBox and dead.nameBox.ClearFocus then dead.nameBox:ClearFocus() end
+                    -- La fila se descarta (no se recicla): saca su EditBox del
+                    -- registro de enlaces (ver RD_UI_Widgets_List.ClearRows).
+                    if dead.nameBox and RD.UIUtils and RD.UIUtils.DisableLinkInsertion then
+                        RD.UIUtils.DisableLinkInsertion(dead.nameBox)
+                    end
                     if dead.EnableMouse then dead:EnableMouse(false) end
                     dead:Hide()
                     dead:SetParent(nil)
