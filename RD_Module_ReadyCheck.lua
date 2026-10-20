@@ -165,7 +165,7 @@ function ReadyCheck:Start(seconds)
         -- AHORA!" va justo tras el tick de 5s cuando existe; si no, cierra el
         -- conteo en t=N. Al final queda solo el resumen. En el modo inmediato
         -- (0s, nativo) no hay ticks: el juego cierra con sus propios eventos.
-        mm:SendMessage(string.format((immediate and "= Ready check lanzado por %s (inmediato) =") or "= Ready check lanzado por %s (%ds) =",
+        mm:SendMessage(string.format((immediate and "= Ready check lanzado por %s =") or "= Ready check lanzado por %s (%ds) =",
             (playerName ~= "" and strupper(playerName)) or "?", n), checkChannel)
         local plan = {}
         local function At(second, text)
