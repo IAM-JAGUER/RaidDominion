@@ -82,6 +82,7 @@ RD_Module_Spammer.lua
 RD_Module_RulesSpammer.lua
 RD_Module_LootCore.lua
 RD_Module_Loot.lua
+RD_Module_LootQueue.lua
 RD_Module_AutoLootCore.lua
 RD_Module_AutoLootMaster.lua
 RD_Module_AutoLoot.lua

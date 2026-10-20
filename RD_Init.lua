@@ -170,7 +170,8 @@ local function InitializeAddon()
         end
     end
 
-    -- Gestor de botín: registra eventos del juego (LOOT_OPENED, CHAT_MSG_SYSTEM)
+    -- Gestor de botín: registra eventos del juego (LOOT_OPENED,
+    -- LOOT_SLOT_CLEARED, LOOT_CLOSED y CHAT_MSG_SYSTEM)
     if RD.modules and RD.modules.loot and RD.modules.loot.Initialize then
         pcall(RD.modules.loot.Initialize, RD.modules.loot)
     end

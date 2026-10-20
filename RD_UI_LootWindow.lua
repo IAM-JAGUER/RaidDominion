@@ -1,14 +1,16 @@
 --[[
     RD_UI_LootWindow.lua
     PROPÓSITO: Ventana modal del gestor de botín (estilo KRT). Muestra el ítem
-              actual (del botín del boss o arrastrado de la bolsa), botones de
-              dados por main/dual/enchant, la lista de dados de la banda con el
-              ganador destacado (contenida en un área con scroll y clicable:
+              actual (de la cola del cadáver o arrastrado de la bolsa), botones
+              de dados por main/dual/enchant, la lista de dados de la banda con
+              el ganador destacado (contenida en un área con scroll y clicable:
               Clic = elegir ganador, Ctrl-Clic = anunciar el dado), countdown
-              del tiempo límite, y acciones: declarar ganador y limpiar. El
-              spameo de botín y la recogida de ítems hacia el maestro viven en
-              el submenú Reglas del menú flotante. Se abre desde la barra de
-              botones de la ventana de banda. Registra RD.ui.lootWindow.
+              del tiempo límite, y acciones: declarar ganador y limpiar (ambas
+              cargan el siguiente ítem pendiente del cadáver). El spameo de
+              botín y la recogida de ítems hacia el maestro viven en el submenú
+              Reglas del menú flotante. Se abre sola al inspeccionar un cadáver
+              siendo líder + maestro despojador, y desde la barra de botones de
+              la ventana de banda. Registra RD.ui.lootWindow.
     API PÚBLICA:
         - RD.ui.lootWindow:Open() / Close() / Toggle()
         - RD.ui.lootWindow:Refresh()
@@ -172,7 +174,15 @@ function Win:Create()
     end)
     if RD.UIUtils and RD.UIUtils.AddButtonTooltip then
         RD.UIUtils.AddButtonTooltip(itemBtn, function()
-            return "Arrastra un ítem de la bolsa aquí, o haz clic con uno en el cursor para tomarlo.\nClic con el cursor vacío: lo sueltas al cursor."
+            local pending = 0
+            local loot = RD.modules and RD.modules.loot
+            local st = loot and loot.GetState and loot:GetState()
+            if st then pending = #(st.pending or {}) end
+            local text = "Arrastra un ítem de la bolsa aquí, o haz clic con uno en el cursor para tomarlo.\nClic con el cursor vacío: lo sueltas al cursor."
+            if pending > 0 then
+                text = text .. string.format("\nÍtems en la cola del cadáver: %d", pending)
+            end
+            return text
         end)
     end
     self.itemNameText = mainView:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -285,10 +295,12 @@ function Win:Create()
     end
 
     -- Acciones: "Declarar ganador" (anuncia ganador + ítem por la salida por
-    -- defecto), "Desempatar" (ronda de desempate si hay empate en el máximo) y
-    -- "Limpiar". El spameo de botín y la recogida de ítems hacia el maestro
-    -- viven en el submenú Reglas del menú flotante (acciones SpamLoot y
-    -- CollectLoot), no en esta ventana.
+    -- defecto, registra en historial y carga el siguiente pendiente),
+    -- "Desempatar" (ronda de desempate si hay empate en el máximo) y "Limpiar"
+    -- (descarta el ítem actual sin declararlo y carga el siguiente pendiente).
+    -- El spameo de botín y la recogida de ítems hacia el maestro viven en el
+    -- submenú Reglas del menú flotante (acciones SpamLoot y CollectLoot), no
+    -- en esta ventana.
     MakeLabel(mainView, "Acciones:", PAD, -300)
     -- Tres botones por fila: 3*w + 2*G <= INNER (124*3 + 8*2 = 388 <= 396).
     local actBtnW = math.floor((INNER - G * 2) / 12) * 4
@@ -300,7 +312,13 @@ function Win:Create()
         local loot = RD.modules and RD.modules.loot
         if loot and loot.AnnounceWinner then
             if loot:AnnounceWinner() then
-                Log("|cff33ff99[RaidDominion]|r Ganador declarado.")
+                local st = loot.GetState and loot:GetState()
+                if st and st.itemLink then
+                    Log("|cff33ff99[RaidDominion]|r Ganador declarado. Siguiente ítem cargado.")
+                else
+                    -- Sin pendientes: el aviso ya lo da el propio gestor.
+                    Log("|cff33ff99[RaidDominion]|r Ganador declarado.")
+                end
             else
                 Log("|cffff0000[RaidDominion]|r No hay ítem o ganador para declarar.")
             end
@@ -328,7 +346,14 @@ function Win:Create()
     self.clearBtn:SetText("Limpiar")
     self.clearBtn:SetScript("OnClick", function()
         local loot = RD.modules and RD.modules.loot
-        if loot and loot.Clear then loot:Clear() end
+        if loot and loot.GetState and loot.Clear then
+            local hadItem = loot:GetState().itemLink ~= nil
+            loot:Clear()
+            local st = loot:GetState()
+            if hadItem and st.itemLink then
+                Log("|cff33ff99[RaidDominion]|r Ítem descartado. Siguiente ítem cargado.")
+            end
+        end
         self:Refresh()
     end)
 

@@ -56,6 +56,12 @@ local state = {
     winnerRoll = nil,    -- dado final del ganador (incluye tiros de desempate)
     history = {},        -- registro persistente de ítems asignados
     announced = false,
+    -- Cola de ítems gestionables del cadáver abierto: { { link, count }, ... }.
+    -- Se reconstruye en cada LOOT_OPENED/LOOT_SLOT_CLEARED (ScanCorpse).
+    pending = {},
+    pendingPos = 0,      -- posición (1-based) del ítem actual en pending (0 = no viene del cadáver)
+    currentFromCorpse = false, -- ¿el ítem actual se cargó de la cola del cadáver?
+    corpseGUID = nil,    -- GUID del cadáver de la sesión actual (para distinguir reaperturas)
     -- Estado del desempate por empate en el dado más alto
     duel = false,        -- si hay una ronda de desempate activa
     duelPlayers = {},    -- nombres de los jugadores que deben desempatar

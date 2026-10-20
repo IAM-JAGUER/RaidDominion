@@ -1,28 +1,29 @@
 --[[
     RD_Module_Loot.lua
-    PROPÓSITO: Motor de gestión de botín (estilo KRT). Lleva registro de los ítems
-              obtenidos en el transcurso de la banda, permite seleccionar un ítem
-              (desde el botín abierto del boss o arrastrado de la bolsa), abrir
-              dados por main/dual/enchant dentro de un tiempo límite, llevar el
-              registro de los dados de la banda, declarar al ganador, spamear el
-              botín del boss caído y limpiar el estado. Sin C_Timer: frame
-              OnUpdate persistente para el countdown de los dados.
+    PROPÓSITO: Motor de gestión de botín (estilo KRT): registro de ítems de la
+              banda, COLA de pendientes del cadáver abierto (carga el primero y
+              avanza al siguiente al declarar ganador o limpiar), selección por
+              botín/bolsa, dados main/dual/enchant con tiempo límite, historial,
+              declaración de ganador, spameo del botín y apertura automática de
+              la ventana al inspeccionar un cadáver (líder + maestro). Sin
+              C_Timer: frame OnUpdate persistente para el countdown de los dados.
     API PÚBLICA:
         - RD.modules.loot:SetItem(itemLink, count)
+        - RD.modules.loot:ScanCorpse(preserveCurrent, loadIfEmpty, loadIfMissing) / Advance()
         - RD.modules.loot:StartRoll(rollType) / Roll() / RecordRolls(bool)
         - RD.modules.loot:GetRolls() / HighestRoll() / GetWinner() / SetWinner(name)
         - RD.modules.loot:GetTiedPlayers() / HasTie() / StartDuel() / ResolveDuel()
         - RD.modules.loot:AnnounceWinner() / SpamLoot() / AnnounceRoll(name) / Clear()
         - RD.modules.loot:SetRollType(main|dual|enchant)
-        - RD.modules.loot:IsMasterLooter()
+        - RD.modules.loot:IsMasterLooter() / ShouldAutoOpen() / LOOT_CLOSED()
         - RD.modules.loot:GetBossLootLinks() / MasterCandidateIndex(slot) / CollectItems()
         - RD.modules.loot:GetHistory() / GetDailyHistory() / GroupByItem(records)
         - RD.modules.loot:GetState()  -- para la UI
     EVENTOS: Publica LOOT_ITEM_ADDED, LOOT_ROLL_ADDED, LOOT_ROLL_CLEARED,
              LOOT_WINNER_SET, LOOT_STATE_CHANGED (para refrescar la UI).
-    DEPENDENCIA: el núcleo lógico (estado, historial, parseo de dados) vive en
-                 RD_Module_LootCore.lua (RD.modules.lootCore), que debe cargarse
-                 antes que este archivo (orden en RaidDominion.toc).
+    DEPENDENCIA: RD_Module_LootCore.lua (estado/historial) se carga antes; la
+                 cola (ScanCorpse/Advance/ShouldAutoOpen/LOOT_CLOSED) vive en
+                 RD_Module_LootQueue.lua y se carga DESPUÉS (orden en el .toc).
 ]]
 
 local addonName, private = ...
@@ -157,9 +158,45 @@ function Loot:GroupByItem(records)
     return LootCore:GroupByItem(records)
 end
 
+-- ==================== Ítems del cadáver ====================
+
+-- Normaliza un valor de GetLootSlotInfo a cantidad numérica. GetLootSlotInfo
+-- devuelve los valores en un orden distinto según el cliente, así que la
+-- cantidad se localiza por su TIPO (primer valor numérico o string numérico)
+-- en lugar de asumir una posición fija. Sin esto, el 2º valor podía ser el
+-- NOMBRE (string) y `count > 1` reventaba con "attempt to compare number with
+-- string".
+local function ToCount(v)
+    if type(v) == "number" then return v end
+    if type(v) == "string" then return tonumber(v) end
+    return nil
+end
+
+-- Lee un slot del botín abierto. Devuelve link + cantidad si es un ítem
+-- gestionable por el maestro (ítem real, sin materiales de encantar y con
+-- rareza >= umbral de botín); nil en caso contrario. Es el criterio único de la
+-- cola de pendientes (RD_Module_LootQueue) y del spameo de botín. La rareza
+-- DESCONOCIDA (ítem aún no cacheado en GetItemInfo) se incluye: el filtro por
+-- umbral solo se aplica cuando el cliente conoce la calidad.
+function Loot:ReadLootSlot(i)
+    if not LootSlotIsItem(i) then return nil end
+    local itemLink = GetLootSlotLink(i)
+    if not itemLink then return nil end
+    if GetItemFamily(itemLink) == 64 then return nil end
+    local _, _, rarity = GetItemInfo(itemLink)
+    local threshold = GetLootThreshold() or 2
+    if rarity ~= nil and rarity < threshold then return nil end
+    local a, b, c = GetLootSlotInfo(i)
+    local count = ToCount(a) or ToCount(b) or ToCount(c)
+    if count and count > 1 then return itemLink, count end
+    return itemLink, 1
+end
+
 -- ==================== Gestión de ítem ====================
 
--- Fija el ítem actual (desde el botín del boss o arrastrado de la bolsa)
+-- Fija el ítem actual (desde el botín del boss o arrastrado de la bolsa).
+-- Cargar a mano (bolsa) saca la posición de la cola: el ítem ya no representa
+-- un pendiente del cadáver.
 function Loot:SetItem(itemLink, count)
     if not itemLink or itemLink == "" then return false end
     local itemName = GetItemInfo(itemLink) or itemLink:match("%[([^%]]+)%]") or itemLink
@@ -169,6 +206,8 @@ function Loot:SetItem(itemLink, count)
     state.itemTexture = itemTexture
     state.itemCount = tonumber(count) or 1
     state.itemRarity = LootCore:GetItemRarity(itemLink)
+    state.pendingPos = 0
+    state.currentFromCorpse = false
     -- Nuevo ítem: reinicia los dados
     self:ClearRolls()
     Publish("LOOT_ITEM_ADDED", state)
@@ -401,7 +440,8 @@ function Loot:AnnounceRoll(playerName)
     return false
 end
 
--- Declara al ganador por la salida por defecto (anuncia el nombre y el ítem)
+-- Declara al ganador por la salida por defecto (anuncia el nombre y el ítem),
+-- lo registra en el historial y AVANZA al siguiente pendiente del cadáver.
 function Loot:AnnounceWinner()
     if not state.itemLink or not state.winner then return false end
     if state.announced then return true end
@@ -415,6 +455,8 @@ function Loot:AnnounceWinner()
     state.countdownActive = false
     LootCore:InvalidateCountdown()
     Publish("LOOT_STATE_CHANGED", state)
+    -- Ítem hecho: el siguiente pendiente pasa a la casilla.
+    self:Advance()
     return true
 end
 
@@ -426,16 +468,10 @@ function Loot:GetBossLootLinks()
     local list = {}
     local n = GetNumLootItems()
     if not n or n <= 0 then return list end
-    local threshold = GetLootThreshold() or 2
     for i = 1, n do
-        if LootSlotIsItem(i) then
-            local itemLink = GetLootSlotLink(i)
-            if itemLink and GetItemFamily(itemLink) ~= 64 then
-                local _, _, rarity = GetItemInfo(itemLink)
-                if (rarity or 0) >= threshold then
-                    list[#list + 1] = itemLink
-                end
-            end
+        local itemLink = self:ReadLootSlot(i)
+        if itemLink then
+            list[#list + 1] = itemLink
         end
     end
     return list
@@ -545,31 +581,31 @@ function Loot:ClearRolls()
     Publish("LOOT_ROLL_CLEARED", state)
 end
 
--- Limpia todo el gestor de botín (ítem + dados + historial)
+-- Descarta el ítem actual (sin declararlo y SIN tocar el historial) y carga el
+-- siguiente pendiente del cadáver. Si no quedan, deja la casilla vacía.
 function Loot:Clear()
-    state.itemName = ""
-    state.itemLink = nil
-    state.itemTexture = nil
-    state.itemCount = 1
-    state.itemRarity = 0
-    state.history = {}
-    self:ClearRolls()
-    Publish("LOOT_STATE_CHANGED", state)
+    self:Advance()
 end
 
 -- ==================== Eventos del juego ====================
 
--- Inicializa el registro de eventos del juego (LOOT_OPENED, CHAT_MSG_SYSTEM).
--- Se llama desde RD_Init en PLAYER_LOGIN.
+-- Inicializa el registro de eventos del juego (LOOT_OPENED, LOOT_SLOT_CLEARED,
+-- LOOT_CLOSED, CHAT_MSG_SYSTEM). Se llama desde RD_Init en PLAYER_LOGIN.
 function Loot:Initialize()
     if self._initialized then return end
     self._initialized = true
     local f = CreateFrame("Frame", "RDLootEvents", UIParent)
     f:RegisterEvent("LOOT_OPENED")
+    f:RegisterEvent("LOOT_SLOT_CLEARED")
+    f:RegisterEvent("LOOT_CLOSED")
     f:RegisterEvent("CHAT_MSG_SYSTEM")
     f:SetScript("OnEvent", function(self, event, arg1)
         if event == "LOOT_OPENED" then
             Loot:LOOT_OPENED()
+        elseif event == "LOOT_SLOT_CLEARED" then
+            Loot:LOOT_SLOT_CLEARED(arg1)
+        elseif event == "LOOT_CLOSED" then
+            Loot:LOOT_CLOSED()
         elseif event == "CHAT_MSG_SYSTEM" then
             Loot:CHAT_MSG_SYSTEM(arg1)
         end
@@ -577,36 +613,34 @@ function Loot:Initialize()
     self._eventFrame = f
 end
 
--- LOOT_OPENED: si hay un botín abierto (boss caído), carga el primer ítem
--- automáticamente. Replica el comportamiento de KRT (master looter).
+-- LOOT_OPENED: inspección de un cadáver con el jugador como maestro despojador.
+-- Reconstruye la cola de pendientes, carga el primer ítem (o conserva el actual
+-- si es el MISMO cadáver reabierto) y abre la ventana del gestor según la
+-- config (ShouldAutoOpen).
 function Loot:LOOT_OPENED()
     if not self:IsMasterLooter() then return end
-    for i = 1, GetNumLootItems() do
-        if LootSlotIsItem(i) then
-            local itemLink = GetLootSlotLink(i)
-            if itemLink and GetItemFamily(itemLink) ~= 64 then
-                -- Carga el primer ítem del botín del boss para gestionarlo.
-                -- El contador es la cantidad del stack del ítem. GetLootSlotInfo
-                -- devuelve los valores en orden distinto según el cliente (aquí
-                -- es "textura, nombre, cantidad, ..."; en otros "nombre, cantidad,
-                -- rareza, ..."), así que se localiza la cantidad por su TIPO
-                -- (primer valor numérico o string numérico) en lugar de asumir
-                -- una posición fija. Sin esto, el 2º valor podía ser el NOMBRE
-                -- (string) y `count > 1` reventaba con "attempt to compare number
-                -- with string".
-                local function ToCount(v)
-                    if type(v) == "number" then return v end
-                    if type(v) == "string" then return tonumber(v) end
-                    return nil
-                end
-                local a, b, c = GetLootSlotInfo(i)
-                local count = ToCount(a) or ToCount(b) or ToCount(c)
-                self:SetItem(itemLink, count and count > 1 and count or 1)
-                Publish("LOOT_ITEM_ADDED", self:GetState())
-                return
+    local guid
+    if UnitGUID then guid = UnitGUID("target") end
+    local sameCorpse = guid ~= nil and guid == state.corpseGUID
+    if guid then state.corpseGUID = guid end
+    self:ScanCorpse(sameCorpse, true, true)
+    if self:ShouldAutoOpen() then
+        local win = RD.ui and RD.ui.lootWindow
+        if win and win.Open then
+            local ok, err = pcall(win.Open, win)
+            if not ok then
+                System("|cffff0000[RaidDominion]|r Error al abrir el gestor de botín: " .. tostring(err))
             end
         end
     end
+end
+
+-- LOOT_SLOT_CLEARED: el servidor retiró un ítem del cadáver (se repartió). Se
+-- reconstruye la cola conservando el ítem actual por link; la ventana NO avanza
+-- sola: el avance lo deciden "Declarar ganador" / "Limpiar".
+function Loot:LOOT_SLOT_CLEARED(_slot)
+    if not self:IsMasterLooter() then return end
+    self:ScanCorpse(true)
 end
 
 -- ==================== Countdown OnUpdate ====================
