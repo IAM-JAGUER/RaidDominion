@@ -34,7 +34,7 @@ local LinkLabel = (RD.UIUtils and RD.UIUtils.LinkLabel)
     or function(t) return tostring(t or "") end
 
 -- Sincroniza nombre / composición desde el nombre de la banda al abrir (o al
--- renombrar). Propaga cambios de band.name → campo Nombre (ICC25H → "ICC 25H"),
+-- renombrar). Propaga cambios de band.name → nombre del spam (ICC25H → "ICC 25H"),
 -- detecta cupo (10/25) y dificultad, y rellena roles si aún no hay personalización
 -- o si el tamaño cambió respecto a la última sync.
 function SpammerWindow:AutoComposition(bandIndex)
@@ -57,25 +57,15 @@ function SpammerWindow:AutoComposition(bandIndex)
     local currentName = tostring(s.name or ""):gsub("^%s+", ""):gsub("%s+$", "")
     local partial = {}
 
-    -- Nombre: se sincroniza con la banda abierta (ICC25H → "ICC 25H"). Se aplica
-    -- si el campo está vacío, si la banda cambió, o si el valor guardado es un
-    -- nombre legacy de plantilla (contiene corchetes internos, p.ej. "Armo [Icc
-    -- 25H]"): el nombre del spam debe ser solo el nombre de la banda, sin
-    -- prefijos extra ni corchetes anidados.
-    local staleName = currentName:find("%[") ~= nil or currentName:find("%]") ~= nil
-    if info.suggestedName and info.suggestedName ~= "" then
-        -- IMPORTANTE (anti-bucle): si el nombre actual YA es el sugerido NO se
-        -- re-sembra, aunque contenga corchetes internos (un nombre-enlace
-        -- |H...|h[Logro]|h se conserva y staleName lo ve "stale" para siempre).
-        -- Reescribir el mismo valor para siempre re-publicaba CONFIG_CHANGED
-        -- ("bands") en cadena (RD.config:Set compara por referencia y SaveBands
-        -- copia la tabla), provocando un bucle reentrante que re-renderizaba el
-        -- submenú Bandas en bucle hasta el error de pila → menú desdibujado.
-        if currentName ~= info.suggestedName then
-            if currentName == "" or bandChanged or staleName then
-                partial.name = info.suggestedName
-            end
-        end
+    -- Nombre: el campo NO es editable (el botón Nombre abre la configuración de
+    -- la banda), así que el nombre del spam SIEMPRE sigue a la banda abierta
+    -- (ICC25H → "ICC 25H"), incluso si quedó guardado un nombre legacy.
+    -- IMPORTANTE (anti-bucle): solo se escribe cuando DIFIERE. Reescribir el
+    -- mismo valor re-publicaba CONFIG_CHANGED ("bands") en cadena (RD.config:Set
+    -- compara por referencia y SaveBands copia la tabla), con bucle reentrante
+    -- que re-renderizaba el submenú Bandas hasta el error de pila.
+    if info.suggestedName and info.suggestedName ~= "" and currentName ~= info.suggestedName then
+        partial.name = info.suggestedName
     end
     if bandName ~= "" and (bandChanged or lastSynced == "") then
         partial.syncedBandName = bandName
@@ -127,6 +117,45 @@ function SpammerWindow:AutoComposition(bandIndex)
         return true
     end
     return false
+end
+
+-- Construye el botón "Nombre" del spammer (sustituye al antiguo EditBox): el
+-- nombre se deriva de la banda, no se edita aquí. Al pulsarlo abre la
+-- configuración de ESA banda (pestaña Bandas), donde se renombra. Vive en este
+-- archivo (carga posterior) para mantener RD_UI_SpammerWindow dentro del límite.
+function SpammerWindow:BuildNameButton(frame, x, y, w)
+    local makeChip = RD.UIUtils and RD.UIUtils.MakeChipButton
+    if not (frame and makeChip) then return nil end
+    local uniqueName = RD.UIUtils and RD.UIUtils.UniqueName
+    local btn = makeChip(frame, uniqueName and uniqueName("SpNm") or nil, w, 24)
+    btn:SetPoint("TOPLEFT", frame, "TOPLEFT", x, y)
+    btn:SetScript("OnClick", function()
+        local cw = RD.ui and RD.ui.configWindow
+        if cw and cw.Show then
+            cw:Show()
+            if cw.SelectTabById then cw:SelectTabById("bands") end
+        else
+            Log("|cffff0000[RaidDominion]|r La ventana de configuración no está disponible.")
+        end
+    end)
+    -- Conserva el highlight del chip (OnEnter/OnLeave de MakeChipButton) y añade
+    -- el tooltip con la pista de acción.
+    local chipEnter, chipLeave = btn:GetScript("OnEnter"), btn:GetScript("OnLeave")
+    btn:SetScript("OnEnter", function(self)
+        if chipEnter then chipEnter(self) end
+        if RD.UIUtils and RD.UIUtils.TooltipsEnabled and RD.UIUtils.TooltipsEnabled() then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Configurar la banda", 1, 0.82, 0, 1, true)
+            GameTooltip:AddLine("Abre Configuración → Bandas para editar el nombre de esta banda.", 1, 1, 1, true)
+            GameTooltip:Show()
+        end
+    end)
+    btn:SetScript("OnLeave", function(self)
+        if chipLeave then chipLeave(self) end
+        GameTooltip:Hide()
+    end)
+    self.nameBtn = btn
+    return btn
 end
 
 function SpammerWindow:Open(bandIndex)
@@ -335,8 +364,8 @@ function SpammerWindow:ResetToBandDefaults()
 end
 
 -- Vacía por completo la config del spammer de la banda: mensaje en blanco,
--- campos editables vacíos, composición en cero, duración por defecto, canales al
--- default (solo RAID) y sin sincronización previa. Se reconstruye band.spammer
+-- campos editables vacíos, composición en cero, duración por defecto (10 s),
+-- sin canales marcados y sin sincronización previa. Se reconstruye band.spammer
 -- desde cero para que no queden restos de valores anteriores (UpdateSpammer
 -- mergea tablas y no limpia claves, por eso se fuerza el reemplazo total).
 function SpammerWindow:ClearAll()

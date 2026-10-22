@@ -142,7 +142,10 @@ local function LoadGoals()
     if type(t.currency) ~= "table" then t.currency = {} end
     if type(t.currencyTracked) ~= "table" then t.currencyTracked = {} end
     if type(t.itemTracked) ~= "table" then t.itemTracked = {} end
-    if type(t.instancesTracked) ~= "boolean" then t.instancesTracked = false end
+    -- Seguimiento de instancias ACTIVADO por defecto (perfil nuevo). Un false
+    -- ya persistido es una decisión del usuario y se respeta: solo se aplica el
+    -- default cuando la clave no existe o no es booleana.
+    if type(t.instancesTracked) ~= "boolean" then t.instancesTracked = true end
     return t, key
 end
 

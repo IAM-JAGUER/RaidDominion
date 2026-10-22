@@ -1,12 +1,13 @@
 --[[
     RD_UI_SpammerWindow.lua
     PROPÓSITO: Ventana modal del spammer de reclutamiento por banda (estilo KRT).
-              Edita bands[i].spammer: prefijo/nombre/sufijo, duración, composición
-              por rol, mensaje con placeholders, canales y vista previa (límite 255).
-              El nombre se sincroniza desde band.name al abrir (ICC25H → "ICC 25H").
-              Las constantes de layout/canales y el envío por canal viven en
-              RD_UI_SpammerWindowCore.lua (carga previa); el control
-              (Open/Close/Toggle) en RD_UI_SpammerWindow_Control.lua.
+              Edita bands[i].spammer: prefijo/sufijo, duración (10 s por defecto),
+              composición, mensaje, canales (solo se persisten los marcados) y
+              vista previa (255). El botón Nombre abre la configuración de la
+              banda (Configuración → Bandas); el nombre se sincroniza desde
+              band.name (ICC25H → "ICC 25H").
+              Constantes/envío por canal: RD_UI_SpammerWindowCore.lua; control
+              (Open/Close/Toggle): RD_UI_SpammerWindow_Control.lua.
     API PÚBLICA:
         - RD.ui.spammerWindow:Open(bandIndex) / Close() / Toggle()
         - RD.ui.spammerWindow:SetRunning(bool) / RefreshBandDropdown()
@@ -70,7 +71,7 @@ function SpammerWindow:RebuildPreview()
     local len = 0
     if spammer and self.bandIndex and spammer.BuildMessage then
         local current = GetCurrent()
-        if current and self.messageBox and self.nameBox then
+        if current and self.messageBox then
             local previewData = {}
             for k, v in pairs(current) do
                 if type(v) == "table" then
@@ -81,7 +82,6 @@ function SpammerWindow:RebuildPreview()
                 end
             end
             previewData.prefix = (self.prefixBox and self.prefixBox:GetText()) or ""
-            previewData.name = self.nameBox:GetText() or ""
             previewData.suffix = (self.suffixBox and self.suffixBox:GetText()) or ""
             previewData.duration = tonumber(self.durationBox and self.durationBox:GetText()) or previewData.duration
             previewData.tank = tonumber(self.tankBox and self.tankBox:GetText()) or 0
@@ -131,9 +131,9 @@ function SpammerWindow:RefreshFields()
     local s = GetCurrent()
     if not s then return end
     if self.prefixBox then self.prefixBox:SetText(s.prefix or "") end
-    if self.nameBox then self.nameBox:SetText(s.name or "") end
+    if self.nameBtn then self.nameBtn:SetText(LinkLabel(s.name or "")) end
     if self.suffixBox then self.suffixBox:SetText(s.suffix or "") end
-    if self.durationBox then self.durationBox:SetText(tostring(s.duration or 60)) end
+    if self.durationBox then self.durationBox:SetText(tostring(s.duration or 10)) end
     if self.tankBox then self.tankBox:SetText(tostring(s.tank or 0)) end
     if self.tankClassBox then self.tankClassBox:SetText(s.tankClass or "") end
     if self.healerBox then self.healerBox:SetText(tostring(s.healer or 0)) end
@@ -358,7 +358,7 @@ function SpammerWindow:Create()
     MakeLabel(frame, "Prefijo", xPrefix, Y.nameLbl)
     self.prefixBox = MakeEditBox(frame, xPrefix, Y.nameBox, fW)
     MakeLabel(frame, "Nombre", xName, Y.nameLbl)
-    self.nameBox = MakeEditBox(frame, xName, Y.nameBox, fW)
+    self:BuildNameButton(frame, xName, Y.nameBox, fW)
     MakeLabel(frame, "Sufijo", xSuffix, Y.nameLbl)
     self.suffixBox = MakeEditBox(frame, xSuffix, Y.nameBox, fW)
     MakeLabel(frame, "Separador", xSep, Y.nameLbl)
@@ -586,9 +586,8 @@ function SpammerWindow:Create()
         if not bands or not self.bandIndex then return end
         local partial = {}
         if self.prefixBox then partial.prefix = self.prefixBox:GetText() end
-        if self.nameBox then partial.name = self.nameBox:GetText() end
         if self.suffixBox then partial.suffix = self.suffixBox:GetText() end
-        if self.durationBox then partial.duration = tonumber(self.durationBox:GetText()) or 60 end
+        if self.durationBox then partial.duration = tonumber(self.durationBox:GetText()) or 10 end
         if self.tankBox then partial.tank = tonumber(self.tankBox:GetText()) or 0 end
         if self.tankClassBox then partial.tankClass = self.tankClassBox:GetText() end
         if self.healerBox then partial.healer = tonumber(self.healerBox:GetText()) or 0 end
@@ -604,7 +603,7 @@ function SpammerWindow:Create()
     end
 
     local boxes = {
-        self.prefixBox, self.nameBox, self.suffixBox, self.durationBox,
+        self.prefixBox, self.suffixBox, self.durationBox,
         self.tankBox, self.tankClassBox, self.healerBox, self.healerClassBox,
         self.meleeBox, self.meleeClassBox, self.rangedBox, self.rangedClassBox,
         self.messageBox,

@@ -4,7 +4,8 @@
               dominio que la capa de persistencia (RD_Config) no debe conocer:
               canal legacy, siembra de listas, booleanos 1/0, dedup de reglas,
               sanciones legacy, limpieza de asignaciones huérfanas, registro
-              detallado por personaje y remapeo del estilo de título de reglas).
+              detallado por personaje, remapeo del estilo de título de reglas y
+              defaults de los spammer: 10 s y sin canales preseleccionados).
     API PÚBLICA:
         - RD.utils.migrations:Run(db, defaults)  -- aplica todas (idempotentes)
     EVENTOS: Ninguno (lo invoca RD.config:Load antes de publicar CONFIG_LOADED).
@@ -233,6 +234,29 @@ function Migrations:Run(db, defaults)
             db.loot.rollTimeLimit = math.min(10, math.floor(tonumber(db.loot.rollTimeLimit) or 10))
         end
         db._lootLimitClamped = true
+    end
+
+    -- Migración (una sola vez): nuevos defaults de los spammer (10 s, sin
+    -- canales preseleccionados). Las duraciones que eran el default viejo
+    -- (60 s en el spammer de banda, 45 s en el de reglas) pasan a 10 s; los
+    -- valores elegidos por el usuario se conservan. Los canales persistidos se
+    -- vacían: a partir de ahora solo se guardan los que marque el usuario.
+    if not db._spammerDefaultsNormalized then
+        if type(db.bands) == "table" then
+            for _, band in ipairs(db.bands) do
+                local sp = band and band.spammer
+                if type(sp) == "table" then
+                    if tonumber(sp.duration) == 60 then sp.duration = 10 end
+                    sp.channels = {}
+                end
+            end
+        end
+        local rules = db.ui and db.ui.rulesSpammer
+        if type(rules) == "table" then
+            if tonumber(rules.duration) == 45 then rules.duration = 10 end
+            rules.channels = {}
+        end
+        db._spammerDefaultsNormalized = true
     end
 
     -- Migración (una sola vez): sanciones de booleano (banned) a causal

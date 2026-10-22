@@ -5,18 +5,20 @@
               ≤ ~700 líneas. Cubre: limpieza/capitalización de nombres
               (CleanName/CapitalizeName), retirada de marcado de enlaces
               (StripMarkup/LinkLabel), descomposición y re-inyección de enlaces
-              (LinkParts/ReinjectVisible), edición segura del texto visible de
+              (LinkParts/FindLink/ReinjectVisible), edición segura del texto visible de
               un enlace (MakeLinkAwareEditBox), detección de icono desde enlace
               (LinkInfo), tooltip compartido con ancho acotado (ShowTooltip),
               gate de tooltips (TooltipsEnabled) y hover/tooltip de filas y
-              botones (AddRowHover/AddButtonTooltip). Se registra sobre la MISMA
-              tabla RD.UIUtils que el padre (ambos archivos la comparten).
+              botones (AddRowHover/AddButtonTooltip/AddItemTooltip). Se registra
+              sobre la MISMA tabla RD.UIUtils que el padre (ambos archivos la
+              comparten).
     API PÚBLICA (añadida a RD.UIUtils):
         - CleanName(name) / CapitalizeName(name)
-        - StripMarkup(text) / LinkLabel(text) / LinkParts(text) / ReinjectVisible(prefix, newVisible, suffix)
+        - StripMarkup(text) / LinkLabel(text) / LinkParts(text) / FindLink(text) / ReinjectVisible(prefix, newVisible, suffix)
         - MakeLinkAwareEditBox(box, initialRaw, opts) / LinkInfo(text)
         - ShowTooltip(owner, text, anchor, maxW) / TooltipsEnabled()
         - AddRowHover(row, getTooltip, extraFrames) / AddButtonTooltip(button, getTooltip, anchor)
+        - AddItemTooltip(button, getLink, getText, anchor)
     ORDEN: cargar ANTES de RD_UI_Utils.lua (ver RaidDominion.toc); el padre
            reutiliza la tabla creada aquí vía assert(RD.UIUtils, ...).
     EVENTOS: Ninguno.
@@ -154,6 +156,65 @@ function UIUtils.LinkParts(text)
     return nil
 end
 
+-- Búsqueda del primer enlace de un texto, con o sin contenido alrededor. Es el
+-- detector PRIMARIO de MakeLinkAwareEditBox: Carbonite, con la opción de
+-- "nivel extra" activa o con Ctrl al hacer shift-clic, no inserta solo el
+-- enlace sino " [70] <enlace> (Zona)" / " <enlace>[H1234]"; antes ese texto no
+-- se adoptaba (quedaba el marcado crudo en el campo) y el enlace no se
+-- conservaba como valor del campo. El texto alrededor se DESCARTA: estos campos
+-- guardan el enlace, no decoraciones de la fuente.
+-- Devuelve prefix, visible y suffix con la MISMA forma que LinkParts:
+--   prefix = |cRRGGBB|H...|h (color opcional incluido)
+--   suffix = |h|r o |h (y sus equivalentes |k)
+-- Se adopta el primer enlace VÁLIDO del texto (un |H malformado se salta); la
+-- parte visible se captura con [^|]* para no cruzar a un segundo enlace.
+function UIUtils.FindLink(text)
+    if type(text) ~= "string" or text == "" then return nil end
+    -- Recorre las apariciones de |H/|K: si la primera está malformada se salta
+    -- y se prueba la siguiente (un |H roto no debe ocultar un enlace válido).
+    local from = 1
+    while from <= #text do
+        local hPos = text:find("|H", from, true)
+        local kPos = text:find("|K", from, true)
+        local start, isK
+        if hPos and kPos then
+            if hPos < kPos then start, isK = hPos, false
+            else start, isK = kPos, true end
+        elseif hPos then start, isK = hPos, false
+        elseif kPos then start, isK = kPos, true
+        else return nil end
+
+        -- El color |cRRGGBB del enlace, si va inmediatamente antes del |H/|K.
+        local color = ""
+        local colorAt = start - 10
+        if colorAt >= 1 and text:sub(colorAt, colorAt + 1) == "|c"
+            and text:sub(colorAt + 2, colorAt + 9):match("^%x%x%x%x%x%x%x%x$") then
+            color = text:sub(colorAt, colorAt + 9)
+        end
+
+        local rest = text:sub(start)
+        local open, visible, close
+        if isK then
+            open, visible, close = rest:match("^(|K[^|]*|k)([^|]*)(|k|r)")
+            if not open then
+                open, visible, close = rest:match("^(|K[^|]*|k)([^|]*)(|k)")
+                -- Color abierto sin |r: se cierra al re-inyectar para no teñir
+                -- el texto posterior (invariante: color ⇒ cierre |k|r).
+                if open and color ~= "" then close = close .. "|r" end
+            end
+        else
+            open, visible, close = rest:match("^(|H[^|]*|h)([^|]*)(|h|r)")
+            if not open then
+                open, visible, close = rest:match("^(|H[^|]*|h)([^|]*)(|h)")
+                if open and color ~= "" then close = close .. "|r" end
+            end
+        end
+        if open then return color .. open, visible, close end
+        from = start + 2
+    end
+    return nil
+end
+
 -- Reconstruye un enlace con un texto visible nuevo, preservando los envoltorios
 -- prefix y suffix obtenidos de LinkParts.  Si prefix o suffix es nil, retorna
 -- solo el texto plano (útil cuando el campo no es un enlace).
@@ -177,8 +238,10 @@ end
          texto plano. Borde azul y tooltip cuando hay enlace activo.
       2) OnTextChanged: re-detecta cada tecla SIN liberar el foco (guardado en
          vivo). Si se pega un enlace completo nuevo se adopta y se muestra su
-         texto visible; si se edita el visible de un enlace existente se
-         re-inyecta; si es texto plano se guarda tal cual.
+         texto visible; si el enlace viene EMBEBIDO con texto alrededor (p.ej.
+         Carbonite con nivel extra: " [70] <enlace> (Zona)") también se adopta
+         el enlace y se descarta el texto decorativo; si se edita el visible de
+         un enlace existente se re-inyecta; si es texto plano se guarda tal cual.
       3) OnEnterPressed/OnEscapePressed: si opts.onCommit existe, lo invoca y
          libera el foco (confirmación). Si no, solo libera el foco.
       4) box.rdGetRaw() devuelve SIEMPRE el valor a guardar (enlace re-inyectado
@@ -197,6 +260,7 @@ function UIUtils.MakeLinkAwareEditBox(box, initialRaw, opts)
     opts = opts or {}
 
     local LinkParts = UIUtils.LinkParts
+    local FindLink = UIUtils.FindLink
     local ReinjectVisible = UIUtils.ReinjectVisible
     local linkPrefix, linkSuffix = nil, nil
     local syncingBox = false
@@ -220,6 +284,7 @@ function UIUtils.MakeLinkAwareEditBox(box, initialRaw, opts)
                 end
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
                 GameTooltip:SetText("Enlace: el texto visible es editable; el enlace se conserva automáticamente.", 1, 1, 1, 1, true)
+                GameTooltip:AddLine("Si pegas un enlace con texto extra alrededor, se conserva solo el enlace.", 0.85, 0.85, 0.85, true)
                 GameTooltip:Show()
             end)
             box:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -249,7 +314,13 @@ function UIUtils.MakeLinkAwareEditBox(box, initialRaw, opts)
             syncingBox = false
         end
         if LinkParts then
-            local p, v, s = LinkParts(raw)
+            -- FindLink primero: es estricto y adopta el PRIMER enlace aunque el
+            -- texto traiga decoraciones alrededor (Carbonite " [70] ... (Zona)");
+            -- LinkParts exige el enlace como texto completo y, con varios
+            -- enlaces, su captura greedy mezclaría el resto del texto.
+            local p, v, s
+            if FindLink then p, v, s = FindLink(raw) end
+            if not p then p, v, s = LinkParts(raw) end
             if p then
                 linkPrefix, linkSuffix = p, s
                 if box.SetText then
@@ -273,7 +344,14 @@ function UIUtils.MakeLinkAwareEditBox(box, initialRaw, opts)
         local raw = strtrim(self.GetText and self:GetText() or "")
         local newP, newV, newS = nil, nil, nil
         if LinkParts then
-            newP, newV, newS = LinkParts(raw)
+            -- FindLink primero (ver ApplyInitial): tolera texto alrededor y
+            -- adopta el primer enlace; LinkParts queda como respaldo.
+            if FindLink then
+                newP, newV, newS = FindLink(raw)
+            end
+            if not newP then
+                newP, newV, newS = LinkParts(raw)
+            end
         end
         if newP and newV and newS then
             -- Pegó un enlace completo: se adopta y se muestra su texto visible.
@@ -454,6 +532,35 @@ function UIUtils.AddRowHover(row, getTooltip, extraFrames)
             f:SetScript("OnLeave", Leave)
         end
     end
+end
+
+-- Tooltip de un botón-ícono que representa un ÍTEM: si `getLink()` devuelve un
+-- enlace, muestra el tooltip estándar de información del juego (nombre con
+-- color de calidad, nivel, estadísticas y requisitos) y NO se gatea por
+-- ui.showTooltips; el interruptor solo afecta a la ayuda. Sin enlace, cae al
+-- tooltip de ayuda de `getText()` (gated por ui.showTooltips), útil para el
+-- estado vacío ("arrastra un ítem aquí").
+function UIUtils.AddItemTooltip(button, getLink, getText, anchor)
+    if not button or not button.SetScript or button.rdItemTip then return end
+    button.rdItemTip = true
+    button:SetScript("OnEnter", function(self)
+        if button.rdHl then button.rdHl:Show() end
+        local link = getLink and getLink()
+        if link and link ~= "" then
+            -- SetHyperlink espera el enlace CRUDO ("item:ID:..."): si llega un
+            -- hipervínculo completo ("|cff...|Hitem:...|h[Nombre]|h|r") se
+            -- normaliza como en el resto de tooltips de ítem del addon.
+            GameTooltip:SetOwner(self, anchor or "ANCHOR_RIGHT")
+            GameTooltip:SetHyperlink(link:match("|H(.-)|h") or link)
+            GameTooltip:Show()
+            return
+        end
+        ShowRowTooltip(self, getText, anchor)
+    end)
+    button:SetScript("OnLeave", function()
+        if button.rdHl then button.rdHl:Hide() end
+        GameTooltip:Hide()
+    end)
 end
 
 -- Tooltip de ayuda para BOTONES principales (p.ej. "Añadir"/"Obtener" de los

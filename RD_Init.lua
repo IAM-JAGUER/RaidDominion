@@ -146,6 +146,11 @@ local function InitializeAddon()
         pcall(RD.utils.characters.RegisterCurrent, RD.utils.characters)
     end
 
+    -- Refrescar equipamiento/instancias tras carga completa de módulos (paperdoll listo)
+    if RD.utils and RD.utils.characters and RD.utils.characters.RegisterCurrent then
+        pcall(RD.utils.characters.RegisterCurrent, RD.utils.characters)
+    end
+
     -- Construir UI (solo en PLAYER_LOGIN, ya garantizado por el flujo)
     if RD.ui and RD.ui.menuFrame and RD.ui.menuFrame.Create then
         RD.ui.menuFrame:Create()
@@ -238,6 +243,10 @@ end
 local f = CreateFrame("Frame")
 f:RegisterEvent("ADDON_LOADED")
 f:RegisterEvent("PLAYER_LOGIN")
+f:RegisterEvent("PLAYER_ENTERING_WORLD")
+f:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+f:RegisterEvent("PLAYER_MONEY")
+f:RegisterEvent("CURRENCY_DISPLAY_UPDATE")
 f:RegisterEvent("PLAYER_LOGOUT")
 
 f:SetScript("OnEvent", function(self, event, arg1)
@@ -248,7 +257,20 @@ f:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "PLAYER_LOGIN" then
         InitializeAddon()
         self:UnregisterEvent("PLAYER_LOGIN")
+    elseif event == "PLAYER_ENTERING_WORLD"
+        or event == "PLAYER_EQUIPMENT_CHANGED"
+        or event == "PLAYER_MONEY"
+        or event == "CURRENCY_DISPLAY_UPDATE" then
+        -- Refresca el snapshot del personaje (equipamiento, monedas, instancias)
+        -- cuando el cliente ya tiene los datos cargados.
+        if RD.utils and RD.utils.characters and RD.utils.characters.RegisterCurrent then
+            pcall(RD.utils.characters.RegisterCurrent, RD.utils.characters)
+        end
     elseif event == "PLAYER_LOGOUT" then
+        -- Actualizar equipamiento/instancias/monedas del personaje actual antes de guardar
+        if RD.utils and RD.utils.characters and RD.utils.characters.RegisterCurrent then
+            pcall(RD.utils.characters.RegisterCurrent, RD.utils.characters)
+        end
         if RD.config and RD.config.Save then
             RD.config:Save()
         end

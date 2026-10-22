@@ -310,6 +310,10 @@ RD.constants = {
             { name = "Jugador", icon = "Interface\\Icons\\INV_Misc_GroupNeedMore", tooltip = "Clic izq.: Abrir mi ficha de jugador\nClic der.: Buscar un jugador de tus listas", action = "ActionBarPlayer", actionRight = "ActionBarPlayerFinder",
               panelHelp = "Abre tu ficha de jugador (información, equipamiento, bandas, instancias y monedas) con el clic izquierdo.\nEl clic derecho abre el buscador: autocompleta con los jugadores de tus listas y tú mismo; Enter abre su edición.\nMayús+clic en un ítem de Equipamiento inserta su enlace en el chat activo.",
               tooltipExtra = {
+                  -- Solo seguimiento OPT-IN (cada bloque, con su check): el
+                  -- equipamiento completo y las notas del personaje NO se
+                  -- muestran aquí: son datos PASIVOS del personaje, disponibles
+                  -- en el SV (registro del portal: registry[key].player).
                   { title = "Seguimiento de monedas:", lines = PlayerTrackedLines },
                   { title = "Seguimiento de objetos:", lines = PlayerTrackedItems },
                   { title = "Seguimiento de instancias:", lines = PlayerTrackedInstances },
@@ -375,7 +379,9 @@ RD.constants = {
     -- Configuración por defecto del spammer de reclutamiento (estilo KRT). Vive
     -- dentro de cada banda (bands[i].spammer); estos defaults se aplican "lazy"
     -- al primer acceso (RD.utils.bands:GetSpammer) sin ensuciar la DB con bandas
-    -- que nunca spamean. channels es un mapa canal -> bool (solo los true envían).
+    -- que nunca spamean. channels es un mapa canal -> bool SOLO con los canales
+    -- elegidos por el usuario (sin preselección: un spammer nuevo no envía hasta
+    -- que se marque un canal).
     SPAMMER_DEFAULTS = {
         name = "",
         -- Prefijo/sufijo por defecto al restablecer el spammer: "Armo" y "Need".
@@ -385,7 +391,7 @@ RD.constants = {
         -- (al renombrar la banda, AutoComposition propaga al abrir el spammer).
         syncedBandName = "",
         syncedSize = 0,
-        duration = 60,
+        duration = 10,
         tank = 0, tankClass = "",
         healer = 0, healerClass = "",
         melee = 0, meleeClass = "",
@@ -393,7 +399,7 @@ RD.constants = {
         message = "",
         -- Separador de partes: "" = sin separador (por defecto al restablecer).
         separator = "",
-        channels = { RAID = true },
+        channels = {},
         -- El ojo de cada fila de composición incluye/omite el texto de CLASES en
         -- el mensaje (el número y el rol siempre se incluyen).
         tankClassShow = true, healerClassShow = true,
@@ -422,9 +428,10 @@ RD.constants = {
     SPAMMER_INITIAL_MESSAGE = "De0,ConDC,CupoFrag,GS {gs}+,Wisp Func+GS",
 
     -- Defaults del spammer de reglas (ui.rulesSpammer; también en DEFAULT_CONFIG).
+    -- Sin canales preseleccionados: solo se persisten los que marque el usuario.
     RULES_SPAMMER_DEFAULTS = {
-        duration = 45,
-        channels = { RAID = true },
+        duration = 10,
+        channels = {},
         selectedTitle = "",
     },
 
@@ -493,8 +500,10 @@ RD.constants = {
                 position = { point = "CENTER", relativeTo = "UIParent", relativePoint = "CENTER", x = 0, y = 0 },
             },
             rulesSpammer = {
-                duration = 45,
-                channels = { RAID = true },
+                -- Sin canales por defecto: MergeTable re-añadiría en cada Load
+                -- cualquier canal que el usuario desmarcara.
+                duration = 10,
+                channels = {},
                 selectedTitle = "",
                 position = { point = "CENTER", relativeTo = "UIParent", relativePoint = "CENTER", x = 0, y = 0 },
             },

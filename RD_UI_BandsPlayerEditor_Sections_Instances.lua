@@ -264,7 +264,7 @@ function Instances:Build(container, ed, width, height)
         end
     end)
     AddButtonTooltip(track, function()
-        return "Check = seguimiento de instancias.\nAparecen en el tooltip del botón Jugador y en el del minimapa."
+        return "Check = seguimiento de instancias.\nAparecen en el tooltip del botón Jugador y en el del minimapa.\nViene ACTIVADO por defecto; quítalo si no quieres ese bloque."
     end)
     header.rdTrack = track
 

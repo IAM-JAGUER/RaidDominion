@@ -5,15 +5,17 @@
               de dados por main/dual/enchant, la lista de dados de la banda con
               el ganador destacado (contenida en un área con scroll y clicable:
               Clic = elegir ganador, Ctrl-Clic = anunciar el dado), countdown
-              del tiempo límite, y acciones: declarar ganador y limpiar (ambas
-              cargan el siguiente ítem pendiente del cadáver). El spameo de
-              botín y la recogida de ítems hacia el maestro viven en el submenú
-              Reglas del menú flotante. Se abre sola al inspeccionar un cadáver
-              siendo líder + maestro despojador, y desde la barra de botones de
-              la ventana de banda. Registra RD.ui.lootWindow.
+              del tiempo límite, y la sección de acciones (declarar ganador,
+              desempatar, limpiar dados) con la navegación de la cola del cadáver
+              ("Anterior" / "Siguiente", en RD_UI_LootWindow_Actions.lua). El
+              spameo de botín y la recogida de ítems hacia el maestro viven en el
+              submenú Reglas del menú flotante. Se abre sola al inspeccionar un
+              cadáver siendo líder + maestro despojador, y desde la barra de
+              botones de la ventana de banda. Registra RD.ui.lootWindow.
     API PÚBLICA:
         - RD.ui.lootWindow:Open() / Close() / Toggle()
         - RD.ui.lootWindow:Refresh()
+        - RD.ui.lootWindow:BuildActions(mainView) / RefreshActions(st)
     EVENTOS: LOOT_ITEM_ADDED, LOOT_ROLL_ADDED, LOOT_ROLL_CLEARED, LOOT_WINNER_SET,
              LOOT_STATE_CHANGED (refrescan la ventana si está visible).
 ]]
@@ -33,11 +35,11 @@ local UniqueName = RD.UIUtils and RD.UIUtils.UniqueName
 local Log = (RD.UIUtils and RD.UIUtils.Log) or function(msg) print(msg) end
 
 local PAD, G = 12, 8
--- WIN_H acotado al contenido real (352 = 44 * 8): el último elemento (la fila
--- de acciones "Declarar ganador" / "Limpiar") termina en y=-340 y el padding
+-- WIN_H acotado al contenido real (384 = 352 + 32): el último elemento (la
+-- fila de navegación "Anterior" / "Siguiente") termina en y=-348 y el padding
 -- inferior queda en PAD=12. El spameo de botín y la recogida de ítems viven en
 -- el submenú Reglas del menú flotante, no en esta ventana.
-local WIN_W, WIN_H = 420, 352
+local WIN_W, WIN_H = 420, 384
 local INNER = WIN_W - PAD * 2
 
 -- Tipos de roll
@@ -146,8 +148,14 @@ function Win:Create()
         local cursorType, _, itemLink = GetCursorInfo()
         if cursorType == "item" and itemLink then
             local loot = RD.modules and RD.modules.loot
-            if loot and loot.SetItem then
-                loot:SetItem(itemLink)
+            -- SetManualItem aparta el ítem de bolsa como "recuerdo": al saltar
+            -- a la cola del cadáver, "Anterior" lo recupera (no se pierde).
+            if loot then
+                if loot.SetManualItem then
+                    loot:SetManualItem(itemLink)
+                elseif loot.SetItem then
+                    loot:SetItem(itemLink)
+                end
                 ClearCursor()
                 self:Refresh()
             end
@@ -163,8 +171,12 @@ function Win:Create()
         if not loot then return end
         if cursorType == "item" then
             local _, _, itemLink = GetCursorInfo()
-            if itemLink and loot.SetItem then
-                loot:SetItem(itemLink)
+            if itemLink then
+                if loot.SetManualItem then
+                    loot:SetManualItem(itemLink)
+                elseif loot.SetItem then
+                    loot:SetItem(itemLink)
+                end
                 ClearCursor()
                 self:Refresh()
             end
@@ -172,8 +184,15 @@ function Win:Create()
             PickupItem(loot.GetState().itemLink)
         end
     end)
-    if RD.UIUtils and RD.UIUtils.AddButtonTooltip then
-        RD.UIUtils.AddButtonTooltip(itemBtn, function()
+    if RD.UIUtils and RD.UIUtils.AddItemTooltip then
+        -- Con ítem cargado: tooltip estándar de información del juego (nombre,
+        -- calidad, estadísticas y requisitos), siempre visible (el gate
+        -- ui.showTooltips solo cubre la ayuda). Sin ítem: ayuda de arrastre.
+        RD.UIUtils.AddItemTooltip(itemBtn, function()
+            local loot = RD.modules and RD.modules.loot
+            local st = loot and loot.GetState and loot:GetState()
+            return st and st.itemLink
+        end, function()
             local pending = 0
             local loot = RD.modules and RD.modules.loot
             local st = loot and loot.GetState and loot:GetState()
@@ -296,66 +315,13 @@ function Win:Create()
 
     -- Acciones: "Declarar ganador" (anuncia ganador + ítem por la salida por
     -- defecto, registra en historial y carga el siguiente pendiente),
-    -- "Desempatar" (ronda de desempate si hay empate en el máximo) y "Limpiar"
-    -- (descarta el ítem actual sin declararlo y carga el siguiente pendiente).
+    -- "Desempatar" (ronda de desempate si hay empate en el máximo), "Limpiar"
+    -- (solo borra los dados del ítem actual) y la navegación de la cola
+    -- ("Anterior" / "Siguiente") para el caso "nadie ha tirado dados".
     -- El spameo de botín y la recogida de ítems hacia el maestro viven en el
     -- submenú Reglas del menú flotante (acciones SpamLoot y CollectLoot), no
-    -- en esta ventana.
-    MakeLabel(mainView, "Acciones:", PAD, -300)
-    -- Tres botones por fila: 3*w + 2*G <= INNER (124*3 + 8*2 = 388 <= 396).
-    local actBtnW = math.floor((INNER - G * 2) / 12) * 4
-
-    self.winnerBtn = RD.UIUtils.MakeChipButton(mainView, UniqueName("LW"), actBtnW, 24)
-    self.winnerBtn:SetPoint("TOPLEFT", mainView, "TOPLEFT", PAD, -316)
-    self.winnerBtn:SetText("Declarar ganador")
-    self.winnerBtn:SetScript("OnClick", function()
-        local loot = RD.modules and RD.modules.loot
-        if loot and loot.AnnounceWinner then
-            if loot:AnnounceWinner() then
-                local st = loot.GetState and loot:GetState()
-                if st and st.itemLink then
-                    Log("|cff33ff99[RaidDominion]|r Ganador declarado. Siguiente ítem cargado.")
-                else
-                    -- Sin pendientes: el aviso ya lo da el propio gestor.
-                    Log("|cff33ff99[RaidDominion]|r Ganador declarado.")
-                end
-            else
-                Log("|cffff0000[RaidDominion]|r No hay ítem o ganador para declarar.")
-            end
-        end
-        self:Refresh()
-    end)
-
-    self.duelBtn = RD.UIUtils.MakeChipButton(mainView, UniqueName("LD"), actBtnW, 24)
-    self.duelBtn:SetPoint("TOPLEFT", mainView, "TOPLEFT", PAD + (actBtnW + G), -316)
-    self.duelBtn:SetText("Desempatar")
-    self.duelBtn:SetScript("OnClick", function()
-        local loot = RD.modules and RD.modules.loot
-        if loot and loot.StartDuel then
-            if loot:StartDuel() then
-                Log("|cff33ff99[RaidDominion]|r Desempate iniciado: solo tiran los empatados.")
-            else
-                Log("|cffff0000[RaidDominion]|r No hay empate que desempatar.")
-            end
-        end
-        self:Refresh()
-    end)
-
-    self.clearBtn = RD.UIUtils.MakeChipButton(mainView, UniqueName("LCl"), actBtnW, 24)
-    self.clearBtn:SetPoint("TOPLEFT", mainView, "TOPLEFT", PAD + 2 * (actBtnW + G), -316)
-    self.clearBtn:SetText("Limpiar")
-    self.clearBtn:SetScript("OnClick", function()
-        local loot = RD.modules and RD.modules.loot
-        if loot and loot.GetState and loot.Clear then
-            local hadItem = loot:GetState().itemLink ~= nil
-            loot:Clear()
-            local st = loot:GetState()
-            if hadItem and st.itemLink then
-                Log("|cff33ff99[RaidDominion]|r Ítem descartado. Siguiente ítem cargado.")
-            end
-        end
-        self:Refresh()
-    end)
+    -- en esta ventana. La sección vive en RD_UI_LootWindow_Actions.lua.
+    self:BuildActions(mainView)
 
     -- ==================== Vista: Historial ====================
     -- Registro por día de dados e ítems entregados (y a quién). La construcción
@@ -491,14 +457,14 @@ function Win:Refresh()
     -- resalta en dorado para distinguirlo del resto.
     self:BuildRollRows(st.rolls or {}, st.winner)
 
-    -- Estado de los botones. "Declarar ganador" se habilita con ítem y ganador
-    -- (esté o no haya bandas: el gestor de botín es independiente de ellas). En
-    -- caso de empate en el máximo, el ganador no se auto-asigna y el botón de
-    -- desempate queda disponible para que solo tiren los empatados; también se
-    -- puede elegir ganador manualmente (clic sobre un dado).
+    -- Estado de los botones de dados. "Declarar ganador" se habilita con ítem y
+    -- ganador (esté o no haya bandas: el gestor de botín es independiente de
+    -- ellas). En caso de empate en el máximo, el ganador no se auto-asigna y el
+    -- botón de desempate queda disponible para que solo tiren los empatados;
+    -- también se puede elegir ganador manualmente (clic sobre un dado).
+    -- Los botones de acción y de navegación de la cola los refresca
+    -- RefreshActions (RD_UI_LootWindow_Actions.lua).
     local hasItem = st.itemLink ~= nil
-    local canDeclare = hasItem and st.winner ~= nil
-    local hasTie = not st.duel and hasItem and loot and loot.HasTie and loot:HasTie()
     -- Resalta el tipo de dados activo (Main/Dual/Enchant) para que se sepa qué
     -- dados se abrieron; los demás vuelven a su color normal.
     local activeType = st.rollType
@@ -515,12 +481,6 @@ function Win:Refresh()
             end
         end
     end
-    if self.winnerBtn then
-        if canDeclare then self.winnerBtn:Enable() else self.winnerBtn:Disable() end
-    end
-    if self.duelBtn then
-        if hasTie then self.duelBtn:Enable() else self.duelBtn:Disable() end
-    end
     if self.rollBtn then
         -- En una ronda de desempate solo puede tirar el jugador local si está
         -- entre los empatados (el filtro de CHAT_MSG_SYSTEM descarta al resto).
@@ -535,6 +495,10 @@ function Win:Refresh()
         end
         if canRollNow then self.rollBtn:Enable() else self.rollBtn:Disable() end
     end
+
+    -- Botones de acción y de navegación de la cola del cadáver (sección
+    -- aparte, RD_UI_LootWindow_Actions.lua).
+    self:RefreshActions(st)
 
     -- Sincroniza el campo de límite de tiempo con la config (sin pisar el texto
     -- mientras el usuario lo está editando). El límite no supera 60 segundos.

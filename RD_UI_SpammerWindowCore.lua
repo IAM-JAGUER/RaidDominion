@@ -103,15 +103,18 @@ SpammerWindow.constants = {
     Y = Y,
 }
 
--- Recolecta el estado de los checks de canal del bucle (tabla { [clave] = bool }).
--- Los checks se crean en BuildChannelControls (padre) y se guardan en
+-- Recolecta SOLO los canales marcados del bucle (mapa canal -> true); los no
+-- marcados se omiten porque la config persiste únicamente la selección del
+-- usuario. Los checks se crean en BuildChannelControls (padre) y se guardan en
 -- self.channelChecks en el mismo orden que CHANNEL_LABELS.
 function SpammerWindow:CollectChannels()
     local out = {}
     for i, c in ipairs(CHANNEL_LABELS) do
         local check = self.channelChecks and self.channelChecks[i]
         local checked = check and check:GetChecked()
-        out[c.key] = (checked == true or checked == 1)
+        if checked == true or checked == 1 then
+            out[c.key] = true
+        end
     end
     return out
 end

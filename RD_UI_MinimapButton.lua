@@ -228,9 +228,12 @@ local function OnEnter(self)
 
     -- Bloques de SEGUIMIENTO (paridad con el tooltip del botón "Jugador" de la
     -- barra inferior, pero SIN avisos de descubrimiento: cada bloque solo
-    -- aparece si tiene datos). Orden: objetos → monedas → instancias. El bloque
-    -- de instancias lo decide el propio módulo (check general de la sección
-    -- Instancias): TooltipLines devuelve nil cuando el check está apagado.
+    -- aparece si tiene datos). Solo seguimiento OPT-IN: objetos → monedas →
+    -- instancias → nota en seguimiento. El equipamiento completo y las notas
+    -- del personaje NO van aquí: son datos PASIVOS disponibles en el SV
+    -- (registry[key].player). El bloque de instancias lo decide el propio
+    -- módulo (check general de la sección Instancias, activado por defecto):
+    -- TooltipLines devuelve nil cuando el check está apagado.
     local first = true
     local function AddBlock(title, lines, maxLines)
         if type(lines) ~= "table" or #lines == 0 then return end

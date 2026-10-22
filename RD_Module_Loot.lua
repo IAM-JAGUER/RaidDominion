@@ -2,18 +2,19 @@
     RD_Module_Loot.lua
     PROPÓSITO: Motor de gestión de botín (estilo KRT): registro de ítems de la
               banda, COLA de pendientes del cadáver abierto (carga el primero y
-              avanza al siguiente al declarar ganador o limpiar), selección por
+              avanza al siguiente al declarar ganador), selección por
               botín/bolsa, dados main/dual/enchant con tiempo límite, historial,
               declaración de ganador, spameo del botín y apertura automática de
               la ventana al inspeccionar un cadáver (líder + maestro). Sin
               C_Timer: frame OnUpdate persistente para el countdown de los dados.
     API PÚBLICA:
         - RD.modules.loot:SetItem(itemLink, count)
-        - RD.modules.loot:ScanCorpse(preserveCurrent, loadIfEmpty, loadIfMissing) / Advance()
+        - RD.modules.loot:ScanCorpse(preserveCurrent, loadIfEmpty, loadIfMissing)
+        - RD.modules.loot:Advance(reason) / SkipItem() / PreviousItem() / GetQueueInfo()
         - RD.modules.loot:StartRoll(rollType) / Roll() / RecordRolls(bool)
         - RD.modules.loot:GetRolls() / HighestRoll() / GetWinner() / SetWinner(name)
         - RD.modules.loot:GetTiedPlayers() / HasTie() / StartDuel() / ResolveDuel()
-        - RD.modules.loot:AnnounceWinner() / SpamLoot() / AnnounceRoll(name) / Clear()
+        - RD.modules.loot:AnnounceWinner() / SpamLoot() / AnnounceRoll(name) / ClearRolls()
         - RD.modules.loot:SetRollType(main|dual|enchant)
         - RD.modules.loot:IsMasterLooter() / ShouldAutoOpen() / LOOT_CLOSED()
         - RD.modules.loot:GetBossLootLinks() / MasterCandidateIndex(slot) / CollectItems()
@@ -455,8 +456,9 @@ function Loot:AnnounceWinner()
     state.countdownActive = false
     LootCore:InvalidateCountdown()
     Publish("LOOT_STATE_CHANGED", state)
-    -- Ítem hecho: el siguiente pendiente pasa a la casilla.
-    self:Advance()
+    -- Ítem hecho: el siguiente pendiente pasa a la casilla (queda marcado como
+    -- entregado: no vuelve a ofrecerse ni al reescanear el cadáver).
+    self:Advance("awarded")
     return true
 end
 
@@ -579,12 +581,6 @@ function Loot:ClearRolls()
     state.duelPlayers = {}
     state.duelRolls = {}
     Publish("LOOT_ROLL_CLEARED", state)
-end
-
--- Descarta el ítem actual (sin declararlo y SIN tocar el historial) y carga el
--- siguiente pendiente del cadáver. Si no quedan, deja la casilla vacía.
-function Loot:Clear()
-    self:Advance()
 end
 
 -- ==================== Eventos del juego ====================

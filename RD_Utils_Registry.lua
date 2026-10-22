@@ -125,32 +125,16 @@ end
 -- Sección: jugador (clase, nivel, equipamiento)
 -- ============================================================================
 
--- Slots de inventario con equipo: 0 munición .. 19 tabardo
-local EQUIP_SLOTS = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 }
-
+-- Fuente ÚNICA del equipamiento: RD_Utils_Equipment lee el paperdoll y este
+-- registro lo exporta tal cual a registry[key].player.equipment. Es un dato
+-- PASIVO del personaje: se guarda SIEMPRE en el SV, sin ningún check de
+-- seguimiento (no es un bloque de seguimiento del tooltip).
 local function BuildEquipment()
-    local items = {}
-    local ilvlSum, ilvlCount = 0, 0
-    for _, slot in ipairs(EQUIP_SLOTS) do
-        local link = GetInventoryItemLink("player", slot)
-        if link then
-            local name, _, quality, iLevel = GetItemInfo(link)
-            -- Ítem no cacheado: al menos rescata el nombre visible del link
-            name = name or string.match(link, "%[([^%]]+)%]") or ("Slot " .. tostring(slot))
-            items[#items + 1] = {
-                slot = slot,
-                name = name,
-                quality = tonumber(quality),
-                ilvl = tonumber(iLevel),
-            }
-            if iLevel then
-                ilvlSum = ilvlSum + iLevel
-                ilvlCount = ilvlCount + 1
-            end
-        end
-    end
-    table.sort(items, function(a, b) return a.slot < b.slot end)
-    return items, #items, (ilvlCount > 0 and math.floor(ilvlSum / ilvlCount + 0.5) or 0)
+    local util = RD.utils and RD.utils.equipment
+    if not (util and util.Get) then return {}, 0, 0 end
+    local ok, items, count, avg = pcall(util.Get, util)
+    if not ok or type(items) ~= "table" then return {}, 0, 0 end
+    return items, tonumber(count) or #items, tonumber(avg) or 0
 end
 
 local function BuildPlayer()
@@ -363,7 +347,7 @@ end
 local function BuildSpammer()
     local state = {
         band = { active = false, bandIndex = 0, timeLeft = 0 },
-        rules = { active = false, duration = 45, channels = {}, selectedTitle = "" },
+        rules = { active = false, duration = 10, channels = {}, selectedTitle = "" },
     }
     local mod = RD.modules and RD.modules.spammer
     if mod then
@@ -376,7 +360,7 @@ local function BuildSpammer()
         state.rules.active = (rmod:IsActive()) or false
     end
     if RD.config and RD.config.Get then
-        state.rules.duration = tonumber(RD.config:Get("ui.rulesSpammer.duration", 45)) or 45
+        state.rules.duration = tonumber(RD.config:Get("ui.rulesSpammer.duration", 10)) or 10
         state.rules.channels = CopyChannels(RD.config:Get("ui.rulesSpammer.channels"))
         state.rules.selectedTitle = tostring(RD.config:Get("ui.rulesSpammer.selectedTitle", "") or "")
     end

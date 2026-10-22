@@ -94,8 +94,8 @@ end
 
 local function Defaults()
     return (RD.constants and RD.constants.RULES_SPAMMER_DEFAULTS) or {
-        duration = 45,
-        channels = { RAID = true },
+        duration = 10,
+        channels = {},
         selectedTitle = "",
     }
 end
@@ -139,7 +139,9 @@ function RulesSpammer:GetSettings()
         local channels = RD.config:Get("ui.rulesSpammer.channels", nil)
         if type(channels) == "table" then
             out.channels = {}
-            for k, v in pairs(channels) do out.channels[k] = (v == true or v == 1) end
+            for k, v in pairs(channels) do
+                if v == true or v == 1 then out.channels[k] = true end
+            end
         end
         local title = RD.config:Get("ui.rulesSpammer.selectedTitle", nil)
         if type(title) == "string" then
@@ -163,12 +165,16 @@ end
 function RulesSpammer:UpdateSettings(partial)
     if type(partial) ~= "table" or not RD.config or not RD.config.Set then return false end
     if partial.duration ~= nil then
-        RD.config:Set("ui.rulesSpammer.duration", tonumber(partial.duration) or 45)
+        RD.config:Set("ui.rulesSpammer.duration", tonumber(partial.duration) or 10)
     end
     if type(partial.channels) == "table" then
-        local cur = self:GetSettings().channels
-        for ck, cv in pairs(partial.channels) do cur[ck] = cv end
-        RD.config:Set("ui.rulesSpammer.channels", cur)
+        -- REEMPLAZO: el caller envía el mapa completo de canales marcados; los
+        -- desmarcados dejan de persistirse (no se mezclan con los anteriores).
+        local out = {}
+        for ck, cv in pairs(partial.channels) do
+            if cv == true or cv == 1 then out[ck] = true end
+        end
+        RD.config:Set("ui.rulesSpammer.channels", out)
     end
     if partial.selectedTitle ~= nil then
         RD.config:Set("ui.rulesSpammer.selectedTitle", tostring(partial.selectedTitle or ""))
@@ -330,7 +336,7 @@ function RulesSpammer:Start()
     active = true
     self:SendNext()
     if not active then return false end
-    local duration = tonumber(settings.duration) or 45
+    local duration = tonumber(settings.duration) or 10
     if duration < 1 then duration = 1 end
     -- Aviso único si algún canal marcado tiene un suelo mayor que `duration`
     -- (Posada e índices 1-9 admiten ~1 envío cada 10 s): el limitador global
@@ -387,7 +393,7 @@ loopFrame:SetScript("OnUpdate", function(self)
             RulesSpammer:SendNext()
         end
         local settings = RulesSpammer:GetSettings()
-        local duration = tonumber(settings.duration) or 45
+        local duration = tonumber(settings.duration) or 10
         if duration < 1 then duration = 1 end
         nextSendAt = now + duration
     end

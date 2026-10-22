@@ -282,12 +282,15 @@ function MenuFactory:BuildMenu(definitions, opts)
             -- asignar/desasignar; clic derecho = anunciar el elemento con la
             -- palabra configurada (assignWord). El icono captura el derecho para
             -- que NO caiga en el "volver al menú anterior" del botón matriz.
+            -- Cubre TODO el extremo derecho (22x22 al borde): sin franja muerta
+            -- entre texto e icono donde el clic anunciaba el elemento sin querer.
             local iconBtn = CreateFrame("Button", nil, button)
-            iconBtn:SetSize(18, 18)
-            iconBtn:SetPoint("RIGHT", button, "RIGHT", -4, 0)
+            iconBtn:SetSize(22, MENU_ITEM_HEIGHT)
+            iconBtn:SetPoint("RIGHT", button, "RIGHT", 0, 0)
             iconBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             local iconTex = iconBtn:CreateTexture(nil, "ARTWORK")
-            iconTex:SetAllPoints()
+            iconTex:SetSize(18, 18)
+            iconTex:SetPoint("CENTER", iconBtn, "CENTER", 0, 0)
             iconTex:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
             iconBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
             iconBtn:SetScript("OnClick", function(self, btn)
@@ -330,7 +333,8 @@ function MenuFactory:BuildMenu(definitions, opts)
             iconBtn:SetScript("OnLeave", function()
                 GameTooltip:Hide()
             end)
-            textRight = -26
+            -- El texto termina EXACTAMENTE donde empieza el icono (sin hueco).
+            textRight = -22
         elseif item.icon then
             -- Icono inline a la izquierda (ítems no asignables)
             local icon = button:CreateTexture(nil, "ARTWORK")

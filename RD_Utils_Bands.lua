@@ -414,7 +414,7 @@ function Bands:GetSpammer(index)
         local n = tonumber(out[k])
         out[k] = n or 0
     end
-    if out.duration < 1 then out.duration = 60 end
+    if out.duration < 1 then out.duration = 10 end
     -- Separador válido SOLO si es una de las opciones actuales (un símbolo o "").
     -- Valores legacy ("//", ", ") se normalizan a "sin separador" para que el
     -- dropdown y la composición nunca divergan.
@@ -449,8 +449,17 @@ function Bands:UpdateSpammer(index, partial)
     if type(partial) == "table" then
         for k, v in pairs(partial) do
             if v ~= nil then
-                if type(v) == "table" and type(band.spammer[k]) == "table" then
-                    -- Merge de tablas (p.ej. channels): preserva claves no tocadas
+                if type(v) == "table" and k == "channels" then
+                    -- channels: REEMPLAZO, no merge. El partial trae solo los
+                    -- canales marcados por el usuario; desmarcar uno debe borrar
+                    -- su clave persistida.
+                    local copy = {}
+                    for kk, vv in pairs(v) do
+                        if vv == true or vv == 1 then copy[kk] = true end
+                    end
+                    band.spammer[k] = copy
+                elseif type(v) == "table" and type(band.spammer[k]) == "table" then
+                    -- Merge de tablas: preserva claves no tocadas
                     for kk, vv in pairs(v) do band.spammer[k][kk] = vv end
                 else
                     band.spammer[k] = v

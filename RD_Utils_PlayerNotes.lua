@@ -10,10 +10,13 @@
                   display = "Nombre", -- último nombre mostrado (tooltip fuera de bandas)
                   tracked = true,     -- seguimiento en tooltips (opt-in)
               }
-              La nota es LOCAL: no viaja por "Obtener" (el codec sanea el campo) ni
-              se exporta al portal. La sección "Información" del editor es la que
-              escribe (texto + espejo en member.notes cuando el jugador está en
-              banda, por compatibilidad con el contrato SV del portal).
+              La nota es LOCAL: no viaja por "Obtener" (el codec sanea el campo).
+              SÍ se exporta al portal como registry[key].player.note: es
+              información propia del personaje, disponible en el SV de forma
+              PASIVA (sin ningún check de seguimiento). La sección "Información"
+              del editor es la que escribe (texto + espejo en member.notes
+              cuando el jugador está en banda, por compatibilidad con el
+              contrato SV del portal).
     API PÚBLICA:
         - RD.utils.playerNotes:GetKey(name)              -> clave normalizada ("" sin nombre)
         - RD.utils.playerNotes:Get(name)                 -> entrada | nil
@@ -273,11 +276,12 @@ local function OneLine(text, maxChars)
 end
 
 -- Lista de notas en seguimiento (solo con texto), orden alfabético por display.
-function PlayerNotes:TrackedNotes()
+-- `onlyTracked`: false = TODAS las notas (sin check).
+local function CollectNotes(onlyTracked)
     local list = {}
     local t = Load()
     for key, entry in pairs(t) do
-        if type(entry) == "table" and entry.tracked == true then
+        if type(entry) == "table" and (not onlyTracked or entry.tracked == true) then
             local text = OneLine(entry.text, MAX_NOTE_CHARS)
             if text ~= "" then
                 local display = tostring(entry.display or "")
@@ -290,6 +294,10 @@ function PlayerNotes:TrackedNotes()
         return string.lower(a.display) < string.lower(b.display)
     end)
     return list
+end
+
+function PlayerNotes:TrackedNotes()
+    return CollectNotes(true)
 end
 
 -- Líneas para el tooltip ("• Nombre: nota"). Devuelve {} si no hay ninguna.

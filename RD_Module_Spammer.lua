@@ -97,7 +97,9 @@ local function SubstitutePlaceholders(msg, spammer, band)
     local playersText = "0"
     local inRaid = GetNumRaidMembers() > 0
     local inParty = GetNumPartyMembers() > 0
-    local count = (inRaid and GetNumRaidMembers()) or (inParty and (GetNumPartyMembers() + 1)) or 0
+    -- Solo (sin banda ni grupo) el jugador cuenta como 1: si no, la cola sale
+    -- como (0/N) hasta entrar en grupo, cuando el propio jugador ya cuenta.
+    local count = (inRaid and GetNumRaidMembers()) or (inParty and (GetNumPartyMembers() + 1)) or 1
     -- El cupo se detecta sobre el nombre SIN marcado de enlace: los dígitos
     -- internos de un enlace (IDs de logro/ítem, GUIDs) no falsean el cupo.
     local maxNum = tonumber(StripMarkup(spammer.name or ""):match("%d+"))
@@ -221,7 +223,9 @@ function Spammer:BuildMessageFrom(s, bandIndex)
     if maxNum then
         local inRaid = GetNumRaidMembers() > 0
         local inParty = GetNumPartyMembers() > 0
-        local count = (inRaid and GetNumRaidMembers()) or (inParty and (GetNumPartyMembers() + 1)) or 0
+        -- Solo (sin banda ni grupo) el jugador cuenta como 1 (ver
+        -- SubstitutePlaceholders).
+        local count = (inRaid and GetNumRaidMembers()) or (inParty and (GetNumPartyMembers() + 1)) or 1
         AddPart("(" .. count .. "/" .. maxNum .. ")")
     end
 
@@ -400,7 +404,7 @@ function Spammer:Start(bandIndex)
 
     activeIndex = bandIndex
     nextSendAt = GetTime()          -- envío inmediato al arrancar
-    local duration = tonumber(s.duration) or 60
+    local duration = tonumber(s.duration) or 10
     if duration < 1 then duration = 1 end
     -- Aviso único si algún canal tiene un suelo mayor que `duration`: el
     -- limitador global espaciará los envíos a ese canal (p.ej. la Posada y los
@@ -469,7 +473,7 @@ loopFrame:SetScript("OnUpdate", function(self)
         local bands = RD.utils and RD.utils.bands
         local s = bands and bands.GetSpammer and bands:GetSpammer(activeIndex)
         -- duration mínimo 1s (evita spam por frame si se escribe 0/negativo)
-        local duration = s and (tonumber(s.duration) or 60) or 60
+        local duration = s and (tonumber(s.duration) or 10) or 10
         if duration < 1 then duration = 1 end
         nextSendAt = now + duration
     end

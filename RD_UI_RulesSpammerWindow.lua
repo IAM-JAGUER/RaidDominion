@@ -85,12 +85,15 @@ local function MakeLabel(parent, text, x, y)
     return fs
 end
 
+-- Solo los canales marcados: los no marcados no se persisten.
 local function CollectChannels()
     local out = {}
     for i, c in ipairs(CHANNEL_LABELS) do
         local check = Win.channelChecks and Win.channelChecks[i]
         local checked = check and check:GetChecked()
-        out[c.key] = (checked == true or checked == 1)
+        if checked == true or checked == 1 then
+            out[c.key] = true
+        end
     end
     return out
 end
@@ -98,7 +101,7 @@ end
 local function CommitSettings()
     local m = Mod()
     if not m then return end
-    local duration = tonumber(Win.durationBox and Win.durationBox:GetText()) or 45
+    local duration = tonumber(Win.durationBox and Win.durationBox:GetText()) or 10
     m:UpdateSettings({
         duration = duration,
         channels = CollectChannels(),
@@ -304,7 +307,7 @@ function Win:RefreshFields()
     local m = Mod()
     local settings = m and m:GetSettings() or {}
     if self.durationBox then
-        self.durationBox:SetText(tostring(settings.duration or 45))
+        self.durationBox:SetText(tostring(settings.duration or 10))
     end
     local channels = settings.channels or {}
     for i, c in ipairs(CHANNEL_LABELS) do

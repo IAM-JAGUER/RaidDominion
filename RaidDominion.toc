@@ -59,6 +59,7 @@ RD_UI_SpammerWindow.lua
 RD_UI_SpammerWindow_Control.lua
 RD_UI_RulesSpammerWindow.lua
 RD_UI_LootWindow.lua
+RD_UI_LootWindow_Actions.lua
 RD_UI_LootWindow_History.lua
 
 # Módulos funcionales
@@ -74,6 +75,7 @@ RD_Utils_Characters.lua
 RD_Utils_Currencies.lua
 RD_Utils_Instances.lua
 RD_Utils_ItemGoals.lua
+RD_Utils_Equipment.lua
 RD_Utils_PlayerNotes.lua
 RD_Utils_Bands.lua
 RD_Utils_Players.lua

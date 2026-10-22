@@ -8,6 +8,10 @@
               3.3.5a devuelve 9 valores (name, isHeader, isExpanded, isUnused,
               isWatched, count, extraCurrencyType, icon, itemID); leer mal la
               posición pinta un cuadro negro (el path real se descarta).
+              Si `count` llega 0 (algunos clientes no lo pueblan hasta abrir la
+              pestaña de monedas) se usa el fallback autoritativo: honor/arena
+              vía GetHonorPoints/GetArenaPoints (extraCurrencyType 1/2) y las
+              monedas basadas en objeto vía GetItemCount(itemID).
               Es la fuente ÚNICA del dato en vivo para:
                 - la sección "Monedas" del editor (RD_UI_BandsPlayerEditor_Sections_Currencies),
                 - el watcher de metas (RD_Module_ItemGoalsWatch),
@@ -78,9 +82,9 @@ function Currencies:Collect()
     local current = "Monedas"
     local n = (GetCurrencyListSize and GetCurrencyListSize()) or 0
     for i = 1, n do
-        local name, isHeader, _, _, _, quantity, _, icon
+        local name, isHeader, _, _, _, quantity, extraType, icon, itemID
         if GetCurrencyListInfo then
-            name, isHeader, _, _, _, quantity, _, icon = GetCurrencyListInfo(i)
+            name, isHeader, _, _, _, quantity, extraType, icon, itemID = GetCurrencyListInfo(i)
         end
         if name then
             if isHeader then
@@ -91,9 +95,23 @@ function Currencies:Collect()
                     groups[#groups + 1] = { title = current, items = {} }
                     g = groups[#groups]
                 end
+                local qty = tonumber(quantity) or 0
+                -- Fallback de cantidad: algunos clientes devuelven 0 hasta que se
+                -- abre la pestaña de monedas. Las monedas basadas en objeto se
+                -- consultan en el inventario; honor/arena con su API dedicada.
+                if qty <= 0 then
+                    if extraType == 1 and type(GetHonorPoints) == "function" then
+                        qty = tonumber(GetHonorPoints()) or 0
+                    elseif extraType == 2 and type(GetArenaPoints) == "function" then
+                        qty = tonumber(GetArenaPoints()) or 0
+                    elseif type(itemID) == "number" and itemID > 0
+                        and type(GetItemCount) == "function" then
+                        qty = tonumber(GetItemCount(itemID)) or 0
+                    end
+                end
                 g.items[#g.items + 1] = {
                     name = name,
-                    quantity = tonumber(quantity) or 0,
+                    quantity = qty,
                     icon = icon or "Interface\\Icons\\INV_Misc_Coin_01",
                 }
             end
