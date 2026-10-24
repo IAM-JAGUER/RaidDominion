@@ -9,8 +9,9 @@
               juego, sin frames ni eventos, por lo que es testeable con mocks
               del harness.
     API PÚBLICA:
-        - RD.utils.equipment:Get()    -> items { {slot,name,quality,ilvl}, ... },
+        - RD.utils.equipment:Get()    -> items { {slot,name,quality,ilvl,itemID}, ... },
                                          count, avgIlvl  (orden por slot)
+              itemID permite al portal enlazar la pieza con su ficha de objeto.
     EVENTOS: Ninguno.
 ]]
 
@@ -41,6 +42,7 @@ function Equipment:Get()
                 name = name,
                 quality = tonumber(quality),
                 ilvl = tonumber(iLevel),
+                itemID = tonumber(string.match(link, "item:(%d+)")),
             }
             if iLevel then
                 ilvlSum = ilvlSum + iLevel
