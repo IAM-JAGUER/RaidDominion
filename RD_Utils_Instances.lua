@@ -3,7 +3,8 @@
     PROPÓSITO: Lectura de las instancias guardadas del personaje
               (GetSavedInstanceInfo) con lógica PURA y COMPARTIDA: la consumen
               la sección "Instancias" del editor de jugador, los tooltips del
-              botón "Jugador" y del minimapa, y la proyección al portal web
+              botón "Jugador" y del minimapa, el snapshot pasivo de
+              characters y, como fallback, la proyección al portal web
               (RD_Utils_Registry). Sin frames, sin mensajes y sin eventos del
               juego, por lo que es testeable con mocks del harness.
               ROBUSTO a la semántica del campo `expires`: en el API estándar

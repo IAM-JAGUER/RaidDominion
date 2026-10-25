@@ -141,14 +141,19 @@ local function InitializeAddon()
     end
 
     -- Detectar/actualizar al personaje actual en la lista de personajes de la
-    -- cuenta (todos comparten la misma DB account-wide).
+    -- cuenta (todos comparten la misma DB account-wide). Una sola pasada: los
+    -- módulos de equipo/instancias/monedas ya están cargados por el .toc y
+    -- "Registrar" reutiliza este snapshot.
     if RD.utils and RD.utils.characters and RD.utils.characters.RegisterCurrent then
         pcall(RD.utils.characters.RegisterCurrent, RD.utils.characters)
     end
 
-    -- Refrescar equipamiento/instancias tras carga completa de módulos (paperdoll listo)
-    if RD.utils and RD.utils.characters and RD.utils.characters.RegisterCurrent then
-        pcall(RD.utils.characters.RegisterCurrent, RD.utils.characters)
+    -- Reconciliar la hermandad del registro guardado (si existe) con el estado
+    -- vivo: para los SV ya guardados con una hermandad de la que el personaje
+    -- salió, elimina registry[clave].guild para que el portal no lo siga
+    -- mostrando como miembro. No auto-registra ni toca el resto del árbol.
+    if RD.utils and RD.utils.registry and RD.utils.registry.SyncGuild then
+        pcall(RD.utils.registry.SyncGuild, RD.utils.registry)
     end
 
     -- Construir UI (solo en PLAYER_LOGIN, ya garantizado por el flujo)
@@ -231,7 +236,7 @@ local function InitializeAddon()
 
     SetupSlashCommands()
 
-    Log(string.format("|cff00ff00[RaidDominion]|r Addon cargado (v%s). /rdh para ayuda.", RD.constants and RD.constants.VERSION or "3.1.0"))
+    Log(string.format("|cff00ff00[RaidDominion]|r Addon cargado (v%s). /rdh para ayuda.", RD.constants and RD.constants.VERSION or "3.2.0"))
 
     if RD.events and RD.events.Publish then
         RD.events:Publish("ADDON_INITIALIZED")
@@ -247,6 +252,8 @@ f:RegisterEvent("PLAYER_ENTERING_WORLD")
 f:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 f:RegisterEvent("PLAYER_MONEY")
 f:RegisterEvent("CURRENCY_DISPLAY_UPDATE")
+f:RegisterEvent("PLAYER_LEVEL_UP")
+f:RegisterEvent("PLAYER_GUILD_UPDATE")
 f:RegisterEvent("PLAYER_LOGOUT")
 
 f:SetScript("OnEvent", function(self, event, arg1)
@@ -260,11 +267,21 @@ f:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "PLAYER_ENTERING_WORLD"
         or event == "PLAYER_EQUIPMENT_CHANGED"
         or event == "PLAYER_MONEY"
-        or event == "CURRENCY_DISPLAY_UPDATE" then
+        or event == "CURRENCY_DISPLAY_UPDATE"
+        or event == "PLAYER_LEVEL_UP" then
         -- Refresca el snapshot del personaje (equipamiento, monedas, instancias)
         -- cuando el cliente ya tiene los datos cargados.
         if RD.utils and RD.utils.characters and RD.utils.characters.RegisterCurrent then
             pcall(RD.utils.characters.RegisterCurrent, RD.utils.characters)
+        end
+    elseif event == "PLAYER_GUILD_UPDATE" then
+        -- Alta, baja o cambio de rango: reconciliar el roster de la cuenta y la
+        -- sección guild del registro guardado del personaje actual.
+        if RD.utils and RD.utils.characters and RD.utils.characters.RegisterCurrent then
+            pcall(RD.utils.characters.RegisterCurrent, RD.utils.characters)
+        end
+        if RD.utils and RD.utils.registry and RD.utils.registry.SyncGuild then
+            pcall(RD.utils.registry.SyncGuild, RD.utils.registry)
         end
     elseif event == "PLAYER_LOGOUT" then
         -- Actualizar equipamiento/instancias/monedas del personaje actual antes de guardar

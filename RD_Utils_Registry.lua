@@ -8,28 +8,35 @@
               convive en una sola DB sin borrarse entre sí, incluida la info
               de hermandad propia de cada uno (cuenta con varias guilds).
               Árbol por personaje:
-                player       -> nombre, reino, nivel, raza, clase, talento,
-                                equipamiento completo (slots 0..19) y las
-                                proyecciones al portal: `note` (nota global del
-                                personaje; vacía si no tiene) e `instances`
-                                (snapshot de instancias guardadas)
+                player       -> nombre, reino, servidor, nivel, raza, clase,
+                                talento, resumen de equipo (count/avgIlvl) y la
+                                nota global del personaje (vacía si no tiene).
+                                El array `equipment` y las `instances` SOLO se
+                                escriben como fallback cuando characters aún
+                                no tiene ese snapshot; si existe, se omiten
+                                para no duplicar datos pesados.
                 objectives   -> objetivos personales de equipamiento y metas
                                 de moneda (solo metas; rama compartida con el
                                 portal web, sin iconos ni flags de seguimiento)
-                assignments  -> ítems (roles/abilities/buffs/auras) asignados
-                                a este jugador
-                bands        -> bandas donde figura (compartidas), con rol/
-                                dual/líder/asistencia/sanción de este jugador
-                spammer      -> estado del spammer de banda y del de reglas
                 guild        -> SOLO si hay hermandad: nombre, rango propio y
                                 la jerarquía COMPLETA de los N rangos (índice
                                 y nombre, ordenada de GM/0 a inferior); si el
                                 jugador es GM incluye además la lista completa
                                 de miembros SIN nota pública ni de oficial;
-                                sin hermandad la sección se omite.
+                                sin hermandad la sección se omite. Esta sección
+                                se reconcilia en login/PLAYER_GUILD_UPDATE con
+                                SyncGuild (alta, baja o cambio de rango).
               COMPARTIDO (fuera del registro): configuración general, roles,
               abilities, auras, buffs, mechanics, rules y bands viven UNA sola
               vez en la DB para toda la cuenta (sin redundancia entre personajes).
+              RD_Utils_Characters es la fuente PASIVA de equipo, instancias,
+              nivel, monedas y dinero de TODOS los personajes (se refresca en
+              login/equipo/nivel/guild/logout). "Registrar" reutiliza ese
+              snapshot sin repetir consultas y solo lo escribe en `registry`
+              como fallback si aún no existe, para que el portal tenga datos
+              frescos sin duplicar arrays. NO se copian datos ajenos a su
+              contrato (bands, asignaciones o spammer, que viven en sus
+              fuentes compartidas).
     API PÚBLICA:
         - RD.utils.registry:Capture(silent)  -- registra AL PERSONAJE ACTUAL
         - RD.utils.registry:Get(key)         -- árbol propio o de otro personaje
@@ -37,15 +44,23 @@
         - RD.utils.registry:Count()          -- personajes registrados
         - RD.utils.registry:GetCurrentKey()  -- clave "Nombre-Reino" actual
         - RD.utils.registry:HasKey(key)      -- ¿existe ese registro?
+        - RD.utils.registry:SyncGuild()      -- reconcilia SOLO registry[clave].guild
+                                               con la hermandad viva (login y
+                                               PLAYER_GUILD_UPDATE); al abandonar
+                                               la elimina para que el portal no
+                                               lo siga mostrando como miembro.
               CONTRATO CON EL PORTAL:
                 - registry["Nombre-Reino"].objectives comparte objetivos
                   personales de equipo y metas de moneda; no expone la raíz
                   local itemGoals ni sus datos de seguimiento.
-                - player.note / player.instances: la nota global del personaje
-                  (store local playerNotes) y el snapshot de las instancias
-                  guardadas (lectura en vivo RD_Utils_Instances) se proyectan
-                  al portal SOLO al pulsar "Registrar"; sin esos módulos las
-                  claves se omiten y la web conserva lo ya publicado.
+                - player.note: la nota global del personaje (store local
+                  playerNotes) se proyecta al pulsar "Registrar"; sin el módulo
+                  la clave se omite y la web conserva lo ya publicado.
+                - player.equipment / player.instances: equipo e instancias son
+                  PASIVOS y viven en characters["Nombre-Reino"]; el portal los
+                  lee de ahí para los personajes ya registrados. El registro
+                  solo los escribe como fallback si characters aún no tiene el
+                  snapshot, y conserva count/avgIlvl como resumen.
               EVENTOS: GUILD_ROSTER_UPDATE (descarga diferida del roster para GM).
                        Dispara CONFIG_CHANGED("registry.<Nombre-Reino>") vía RD.config:Set.
 ]]
@@ -61,6 +76,14 @@ local Log = (RD.UIUtils and RD.UIUtils.Log) or function(msg) print(msg) end
 -- Espera activa de GUILD_ROSTER_UPDATE (una sola a la vez; sin C_Timer)
 local rosterWaiter = nil
 
+-- IsInGuild de 3.3.5a devuelve 1/nil (NO true/false). Normaliza a booleano;
+-- nil solo si la API no existe (no se debe borrar nada a ciegas).
+local function QueryPlayerGuild()
+    if type(IsInGuild) ~= "function" then return nil end
+    local value = IsInGuild()
+    return not (value == nil or value == false or value == 0)
+end
+
 -- ============================================================================
 -- Helpers
 -- ============================================================================
@@ -74,15 +97,6 @@ function Registry:GetCurrentKey()
     end
     local name = UnitName("player") or "?"
     return tostring(name) .. "-" .. tostring(GetRealmName() or "?")
-end
-
-local function CleanName(name)
-    if RD.UIUtils and RD.UIUtils.CleanName then
-        return RD.UIUtils.CleanName(name)
-    end
-    local clean = string.gsub(tostring(name or ""), "%-.*", "")
-    clean = string.gsub(clean, "%s+", "")
-    return string.lower(clean)
 end
 
 -- Servidor (host del realmlist, p.ej. "logon.warmane.com"), distinto del
@@ -110,26 +124,39 @@ local function DeepCopy(orig)
     return copy
 end
 
--- Copia solo los canales marcados (true) de una tabla {CANAL=bool}
-local function CopyChannels(channels)
-    local out = {}
-    if type(channels) == "table" then
-        for ch, on in pairs(channels) do
-            if on then out[ch] = true end
-        end
+-- Snapshot account-wide del personaje actual. RD_Utils_Characters lo refresca
+-- en login, cambios de equipo/dinero/monedas, entrada al mundo y logout. El
+-- registro lo reutiliza para no repetir consultas al paperdoll ni a las
+-- instancias al pulsar "Registrar".
+local function GetCharacterSnapshot()
+    local chars = RD.utils and RD.utils.characters
+    if not (chars and chars.GetCurrentKey) then return nil end
+    local key = chars:GetCurrentKey()
+    if not key then return nil end
+    if chars.Get then
+        local ok, info = pcall(chars.Get, chars, key)
+        if ok and type(info) == "table" then return info end
     end
-    return out
+    if type(RaidDominionDB) == "table" and type(RaidDominionDB.characters) == "table" then
+        return RaidDominionDB.characters[key]
+    end
+    return nil
 end
 
 -- ============================================================================
 -- Sección: jugador (clase, nivel, equipamiento)
 -- ============================================================================
 
--- Fuente ÚNICA del equipamiento: RD_Utils_Equipment lee el paperdoll y este
--- registro lo exporta tal cual a registry[key].player.equipment. Es un dato
--- PASIVO del personaje: se guarda SIEMPRE en el SV, sin ningún check de
--- seguimiento (no es un bloque de seguimiento del tooltip).
-local function BuildEquipment()
+-- Equipamiento del personaje: se reutiliza el snapshot vigente de characters.
+-- Solo si aún no hay piezas guardadas (paperdoll no listo en el login) se lee
+-- el paperdoll en vivo como fallback. Es un dato PASIVO del SV, sin check de
+-- seguimiento, y el registro conserva su forma para el portal.
+local function BuildEquipment(snapshot)
+    if snapshot and type(snapshot.equipment) == "table" and #snapshot.equipment > 0 then
+        return snapshot.equipment,
+            tonumber(snapshot.equipmentCount) or #snapshot.equipment,
+            tonumber(snapshot.avgIlvl) or 0
+    end
     local util = RD.utils and RD.utils.equipment
     if not (util and util.Get) then return {}, 0, 0 end
     local ok, items, count, avg = pcall(util.Get, util)
@@ -137,14 +164,36 @@ local function BuildEquipment()
     return items, tonumber(count) or #items, tonumber(avg) or 0
 end
 
-local function BuildPlayer()
-    local className, classFile = UnitClass("player")
-    local raceName, raceFile = UnitRace("player")
+-- Identidad del jugador: primero el snapshot de characters (misma fuente que
+-- el roster de la cuenta) y, si falta algún campo, la API del cliente.
+local function BuildPlayer(snapshot)
+    local name = snapshot and snapshot.name
+    if not name or name == "" then name = UnitName("player") or "" end
+    local realm = snapshot and snapshot.realm
+    if not realm or realm == "" then realm = GetRealmName() or "" end
+    -- El nivel puede cambiar sin relog: se lee en vivo (llamada barata) y solo
+    -- se usa el snapshot si el cliente no lo da.
+    local level = UnitLevel("player")
+    if not level or level <= 0 then level = snapshot and tonumber(snapshot.level) end
+    local raceName = snapshot and snapshot.raceName
+    local raceFile = snapshot and snapshot.raceFile
+    if not raceName or raceName == "" or not raceFile or raceFile == "" then
+        local rn, rf = UnitRace("player")
+        if not raceName or raceName == "" then raceName = rn end
+        if not raceFile or raceFile == "" then raceFile = rf end
+    end
+    local className = snapshot and snapshot.className
+    local classFile = snapshot and snapshot.classFile
+    if not className or className == "" or not classFile or classFile == "" then
+        local cn, cf = UnitClass("player")
+        if not className or className == "" then className = cn end
+        if not classFile or classFile == "" then classFile = cf end
+    end
     local player = {
-        name = UnitName("player") or "",
-        realm = GetRealmName() or "",
+        name = name,
+        realm = realm,
         server = GetServerName(),
-        level = UnitLevel("player"),
+        level = level,
         race = raceName or "",
         raceFile = raceFile or "",
         class = className or "",
@@ -161,15 +210,23 @@ local function BuildPlayer()
             player.talentSpec = GetTalentTabInfo(tree) or ""
         end
     end
-    local equipment, equipped, avgIlvl = BuildEquipment()
-    player.equipment = equipment
+    local equipment, equipped, avgIlvl = BuildEquipment(snapshot)
+    -- El array de equipo es el bloque pesado y ya vive en characters: si ese
+    -- snapshot existe, el registro NO lo duplica. Se conserva el resumen
+    -- (count/avg) como fallback barato y solo se escribe el array completo
+    -- cuando characters aún no tiene piezas válidas.
+    local hasSnapshotEquipment = type(snapshot) == "table"
+        and type(snapshot.equipment) == "table" and #snapshot.equipment > 0
+    if not hasSnapshotEquipment then
+        player.equipment = equipment
+    end
     player.equipmentCount = equipped
     player.avgIlvl = avgIlvl
     return player
 end
 
 -- ============================================================================
--- Sección: proyecciones locales al portal (nota global + instancias guardadas)
+-- Sección: proyecciones locales al portal (nota global + fallback de instancias)
 -- ============================================================================
 
 -- Nota GLOBAL del personaje actual (RD_Utils_PlayerNotes, store local del
@@ -186,14 +243,22 @@ local function BuildNote()
 end
 
 -- Snapshot de instancias guardadas para el portal (nombre, dificultad y
--- reinicio ABSOLUTO): lo proyecta RD_Utils_Instances.Export. Sin el módulo la
--- clave se omite (no pisa lo ya publicado); con el módulo se exporta SIEMPRE
--- una lista (posiblemente vacía) para que un re-registro sin instancias limpie
--- las expiradas.
-local function BuildInstances()
+-- reinicio ABSOLUTO): ya lo proyecta RD_Utils_Instances.Export en el snapshot
+-- de characters, así que el registro NO lo duplica cuando ese snapshot existe
+-- (se devuelve nil para omitir la clave). Solo si characters aún no tiene la
+-- lista se exporta en vivo como fallback; sin el módulo la clave se omite
+-- (no pisa lo ya publicado). Con el módulo el fallback puede ir vacío para que
+-- un re-registro sin instancias limpie las expiradas.
+local function BuildInstances(snapshot)
+    if type(snapshot) == "table" and type(snapshot.instances) == "table" then
+        return nil
+    end
     local util = RD.utils and RD.utils.instances
     if not (util and util.Export) then return nil end
-    return util:Export()
+    local ok, list = pcall(util.Export, util)
+    if ok and type(list) == "table" then return list end
+    -- Fallo de lectura: omitir la clave para no borrar lo ya publicado.
+    return nil
 end
 
 -- ============================================================================
@@ -277,94 +342,6 @@ local function BuildObjectives()
     end)
 
     return objectives
-end
-
--- ============================================================================
--- Sección: asignaciones vigentes para ESTE jugador
--- ============================================================================
-
-local ASSIGNABLE_LISTS = { "roles", "abilities", "buffs", "auras" }
-
-local function BuildAssignments(playerKey)
-    local out = { count = 0 }
-    for _, listKey in ipairs(ASSIGNABLE_LISTS) do
-        local tbl = {}
-        if RD.utils and RD.utils.assignments and RD.utils.assignments.Get then
-            tbl = RD.utils.assignments:Get(listKey) or {}
-        end
-        if type(tbl) == "table" then
-            local mine = {}
-            for itemName, assigned in pairs(tbl) do
-                if assigned and assigned ~= "" and CleanName(assigned) == playerKey then
-                    mine[#mine + 1] = itemName
-                end
-            end
-            if #mine > 0 then
-                table.sort(mine)
-                out[listKey] = mine
-                out.count = out.count + #mine
-            end
-        end
-    end
-    return out
-end
-
--- ============================================================================
--- Sección: bandas donde está registrado este jugador
--- ============================================================================
-
-local function BuildBands(playerKey)
-    local out = {}
-    local bands = {}
-    if RD.utils and RD.utils.bands and RD.utils.bands.GetBands then
-        bands = RD.utils.bands:GetBands() or {}
-    end
-    for _, band in ipairs(bands) do
-        local players = type(band.players) == "table" and band.players or {}
-        for _, m in ipairs(players) do
-            if m.name and CleanName(m.name) == playerKey then
-                out[#out + 1] = {
-                    band = band.name or "",
-                    schedule = band.schedule or "",
-                    minGS = tonumber(band.minGS) or 0,
-                    role = m.role or "",
-                    dual = m.dual or "",
-                    leader = m.leader or "",
-                    points = tonumber(m.points) or 0,
-                    sanction = m.sanction or "",
-                }
-                break
-            end
-        end
-    end
-    return out
-end
-
--- ============================================================================
--- Sección: estado de los spammers (banda y reglas)
--- ============================================================================
-
-local function BuildSpammer()
-    local state = {
-        band = { active = false, bandIndex = 0, timeLeft = 0 },
-        rules = { active = false, duration = 10, channels = {}, selectedTitle = "" },
-    }
-    local mod = RD.modules and RD.modules.spammer
-    if mod then
-        state.band.active = (mod.IsActive and mod:IsActive()) or false
-        state.band.bandIndex = tonumber(mod.ActiveIndex and mod:ActiveIndex()) or 0
-        state.band.timeLeft = math.floor((tonumber(mod.TimeLeft and mod:TimeLeft()) or 0) + 0.5)
-    end
-    local rmod = RD.modules and RD.modules.rulesSpammer
-    if rmod and rmod.IsActive then
-        state.rules.active = (rmod:IsActive()) or false
-    end
-    if RD.config and RD.config.Get then
-        state.rules.duration = tonumber(RD.config:Get("ui.rulesSpammer.duration", 10)) or 10
-        state.rules.channels = CopyChannels(RD.config:Get("ui.rulesSpammer.channels"))
-        state.rules.selectedTitle = tostring(RD.config:Get("ui.rulesSpammer.selectedTitle", "") or "")
-    end
-    return state
 end
 
 -- ============================================================================
@@ -495,6 +472,71 @@ local function RequestRosterAndRecapture()
 end
 
 -- ============================================================================
+-- Sincronización de hermandad (sin volver a pulsar "Registrar")
+-- ============================================================================
+
+-- Reconcilia SOLO la sección guild del registro existente del personaje actual
+-- con el estado VIVO de hermandad:
+--   * sin hermandad -> elimina registry[clave].guild (el portal deja de
+--     listarlo como miembro);
+--   * con hermandad -> actualiza nombre, rango, jerarquía y, si es GM, roster.
+-- No auto-registra personajes sin entrada previa ni toca player, objectives,
+-- note, instances o savedAt. Si el cliente aún no expone el nombre de la
+-- hermandad (transitorio al cargar), NO borra: conserva lo ya guardado.
+function Registry:SyncGuild()
+    local key = Registry:GetCurrentKey()
+    if not key then return false end
+
+    local tree = Registry:Get(key)
+    if type(tree) ~= "table" then return false end
+
+    local inGuild = QueryPlayerGuild()
+
+    if inGuild == false then
+        if tree.guild == nil then return true end
+        if RD.config and RD.config.Set then
+            RD.config:Set("registry." .. key .. ".guild", nil)
+        end
+        return true
+    end
+    if not inGuild then return false end
+
+    local guildName = GetGuildInfo("player")
+    if type(guildName) ~= "string" or guildName == "" then
+        return false
+    end
+
+    local previous = tree.guild
+    local guild, rosterPending = BuildGuild()
+    if not guild then return false end
+
+    -- Misma hermandad con el roster aún sin descargar: conservar los datos
+    -- completos ya guardados para no degradar el registro con vacíos.
+    if type(previous) == "table" and previous.name == guild.name then
+        if rosterPending then
+            if type(previous.memberList) == "table" then
+                guild.memberList = previous.memberList
+                rosterPending = false
+            end
+            if type(previous.ranks) == "table" and #(guild.ranks or {}) == 0 then
+                guild.ranks = previous.ranks
+            end
+        end
+        if (tonumber(guild.numMembers) or 0) == 0 then
+            guild.numMembers = tonumber(previous.numMembers) or guild.numMembers
+        end
+    end
+
+    if RD.config and RD.config.Set then
+        RD.config:Set("registry." .. key .. ".guild", guild)
+    end
+    if rosterPending then
+        RequestRosterAndRecapture()
+    end
+    return true
+end
+
+-- ============================================================================
 -- API pública
 -- ============================================================================
 
@@ -532,17 +574,17 @@ end
 -- resume por chat. silent=true evita el resumen (usado por la re-captura tras
 -- GUILD_ROSTER_UPDATE). Los registros de OTROS personajes se preservan.
 function Registry:Capture(silent)
-    local playerName = UnitName("player") or ""
-    local playerKey = CleanName(playerName)
-
-    local player = BuildPlayer()
-    -- Proyecciones locales al portal, dentro del scope del personaje: la nota
-    -- global (siempre que el módulo exista) y el snapshot de instancias.
+    -- Un solo snapshot de characters alimenta identidad, equipamiento e
+    -- instancias: no se repiten consultas ni procesamientos en "Registrar".
+    local snapshot = GetCharacterSnapshot()
+    local player = BuildPlayer(snapshot)
+    -- La nota se proyecta al portal. Las instancias solo se escriben como
+    -- fallback si characters aún no las tiene (ver BuildInstances).
     local note = BuildNote()
     if note ~= nil then
         player.note = note
     end
-    local instances = BuildInstances()
+    local instances = BuildInstances(snapshot)
     if instances ~= nil then
         player.instances = instances
     end
@@ -551,9 +593,6 @@ function Registry:Capture(silent)
         savedAt = date("%Y-%m-%d %H:%M:%S"),
         player = player,
         objectives = BuildObjectives(),
-        assignments = BuildAssignments(playerKey),
-        bands = BuildBands(playerKey),
-        spammer = BuildSpammer(),
     }
 
     local guild, rosterPending = BuildGuild()
@@ -577,9 +616,6 @@ function Registry:Capture(silent)
             "|cff33ff99[RaidDominion]|r Jugador: %s · %s nivel %d · %d piezas (iLvl medio %d).",
             tostring(p.name), tostring(p.class), tonumber(p.level) or 0,
             tonumber(p.equipmentCount) or 0, tonumber(p.avgIlvl) or 0))
-        Log(string.format(
-            "|cff33ff99[RaidDominion]|r Bandas donde figura: %d · Asignaciones activas: %d.",
-            #tree.bands, tonumber(tree.assignments.count) or 0))
         if not guild then
             Log("|cffff8000[RaidDominion]|r Sin hermandad: el registro incluye solo los datos del jugador.")
         elseif guild.isGM then

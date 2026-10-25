@@ -1,13 +1,13 @@
 --[[
     RD_Utils_Equipment.lua
     PROPÓSITO: Equipamiento ACTUAL del personaje (paperdoll, slots 0..19) como
-              fuente única del snapshot PASIVO que se guarda en el SV: el
-              registro del portal (RD_Utils_Registry) exporta
-              registry["Nombre-Reino"].player.equipment SIEMPRE, sin ningún
-              check de seguimiento (es información propia del personaje, no un
-              bloque de seguimiento del tooltip). Lógica PURA: solo lee APIs del
-              juego, sin frames ni eventos, por lo que es testeable con mocks
-              del harness.
+              fuente única del snapshot PASIVO que se guarda en
+              characters["Nombre-Reino"].equipment, sin ningún check de
+              seguimiento (es información propia del personaje, no un bloque de
+              seguimiento del tooltip). RD_Utils_Registry lo reutiliza al
+              registrar y solo lo copia a registry como fallback si characters
+              aún no tiene piezas. Lógica PURA: solo lee APIs del juego, sin
+              frames ni eventos, por lo que es testeable con mocks del harness.
     API PÚBLICA:
         - RD.utils.equipment:Get()    -> items { {slot,name,quality,ilvl,itemID}, ... },
                                          count, avgIlvl  (orden por slot)

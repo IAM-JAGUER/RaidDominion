@@ -51,6 +51,14 @@ local function BuildKey(name, realm)
     return tostring(name or "?") .. "-" .. tostring(realm or "?")
 end
 
+-- IsInGuild de 3.3.5a devuelve 1/nil (NO true/false). Normaliza a booleano;
+-- nil solo si la API no existe, para no borrar datos a ciegas.
+local function QueryPlayerGuild()
+    if type(IsInGuild) ~= "function" then return nil end
+    local value = IsInGuild()
+    return not (value == nil or value == false or value == 0)
+end
+
 -- Registra (o actualiza) al personaje actual en la DB account-wide.
 -- Se invoca en login, al cambiar equipo/dinero/monedas y en logout. Al salir,
 -- el cliente puede haber liberado la unidad "player": se conserva la clave
@@ -68,7 +76,7 @@ function Characters:RegisterCurrent()
     local now = time()
 
     local className, classFile = UnitClass("player")
-    local raceName = UnitRace("player")
+    local raceName, raceFile = UnitRace("player")
     local faction = UnitFactionGroup("player")
 
     local info = container[currentKey]
@@ -123,11 +131,24 @@ function Characters:RegisterCurrent()
     if className then info.className = className end
     if classFile then info.classFile = classFile end
     if raceName then info.raceName = raceName end
+    if raceFile then info.raceFile = raceFile end
     if faction then info.faction = faction end
     local lvl = UnitLevel("player")
     if type(lvl) == "number" and lvl > 0 then info.level = lvl end
+
+    -- Hermandad: IsInGuild (1/nil en 3.3.5a) es la fuente AUTORITATIVA. Si
+    -- confirma que no hay hermandad, se borra SIEMPRE, aunque GetGuildInfo
+    -- conserve el nombre anterior en caché. Con hermandad se actualiza el
+    -- nombre cuando el cliente lo expone (GetGuildInfo puede devolver nil de
+    -- forma transitoria al cargar). Sin la API, solo se actualiza.
+    local inGuild = QueryPlayerGuild()
     local guildName = GetGuildInfo("player")
-    if guildName then info.guildName = guildName end
+    if inGuild == false then
+        info.guildName = nil
+    elseif type(guildName) == "string" and guildName ~= "" then
+        info.guildName = guildName
+    end
+
     info.lastSeen = now
 
     if RD.config and RD.config.Save then
@@ -183,16 +204,15 @@ function Characters:RegisterCurrent()
         end
     end
 
-    -- Instancias: guardado independiente de "Registrar".
+    -- Instancias: guardado independiente de "Registrar". Si el export falla o
+    -- el módulo no está cargado, se CONSERVA el último snapshot válido para no
+    -- borrar lockouts con una lectura incompleta. Un export correcto (aunque
+    -- venga vacío) sí reemplaza la lista para limpiar las expiradas.
     if RD.utils and RD.utils.instances and RD.utils.instances.Export then
         local ok, list = pcall(RD.utils.instances.Export, RD.utils.instances)
         if ok and type(list) == "table" then
             info.instances = list
-        else
-            info.instances = {}
         end
-    else
-        info.instances = {}
     end
 
     if RD.events and RD.events.Publish then

@@ -2,7 +2,7 @@
 ## Title: RaidDominion
 ## Notes: Facilita la gestión de la raid, la asignación de responsabilidades en la banda.
 ## Author: Andres Muñoz - https://raid-dominion.netlify.app/
-## Version: 3.1.0
+## Version: 3.2.0
 ## SavedVariables: RaidDominionDB
 ## DefaultState: enabled
 ## X-Category: Raid

@@ -176,9 +176,10 @@ end
 
 -- Genera y guarda el registro detallado del PERSONAJE ACTUAL en las
 -- SavedVariables (clave "registry.Nombre-Reino", una entrada por personaje de
--- la cuenta): clase, equipo, asignaciones, bandas, spammers y hermandad
--- (roster completo solo si el jugador es GM). Los registros de los demás
--- personajes se preservan.
+-- la cuenta): identidad, resumen de equipo, objetivos y hermandad (roster
+-- completo solo si el jugador es GM). Equipo e instancias se reutilizan del
+-- snapshot de characters (que es su fuente canónica) y solo se copian aquí
+-- como fallback si aún no existe. Los demás personajes se preservan.
 local function HandleRegisterPlayer()
     local reg = RD.utils and RD.utils.registry
     if reg and reg.Capture then

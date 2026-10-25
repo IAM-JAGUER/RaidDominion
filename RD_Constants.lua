@@ -66,7 +66,7 @@ end
 local WEBSITE = "https://raid-dominion.netlify.app/"
 
 RD.constants = {
-    VERSION = "3.1.0",
+    VERSION = "3.2.0",
     AUTHOR = "Andres Muñoz",
     WEBSITE = WEBSITE,
 
@@ -450,7 +450,7 @@ RD.constants = {
             { id = "addonOptions", name = "RaidDominion", tooltip = "Configuración del addon", submenu = "addonOptions" },
         },
         addonOptions = {
-            { name = "Registrar", action = "RegisterPlayer", icon = "Interface\\Icons\\INV_Misc_Book_09", tooltip = "Guardar un registro completo del jugador (clase, equipamiento, objetivos, bandas, hermandad)" },
+            { name = "Registrar", action = "RegisterPlayer", icon = "Interface\\Icons\\INV_Misc_Book_09", tooltip = "Guardar un registro completo del jugador (clase, equipamiento, objetivos, hermandad)" },
             { name = "Configuración", action = "ToggleConfig", tooltip = "Abrir la ventana de configuración" },
             { name = "Ayuda",         action = "ShowHelp",     tooltip = "Mostrar ayuda del addon" },
             { name = "Recargar",      action = "ReloadUI",     tooltip = "Recargar la interfaz" },
@@ -730,7 +730,7 @@ RD.constants = {
         { id = "help", title = "Ayuda", order = 100, icon = "Interface\\Icons\\INV_Misc_Book_09", compact = true, sections = {
             { id = "general", title = "Guía de RaidDominion", fields = {
                 { key = "helpAccordion", type = "helpAccordion", entries = {
-                    { title = "Acerca de", content = "RaidDominion v3.1.0 es un gestor de banda para World of Warcraft 3.3.5a (WotLK, esMX).\nOrganiza roles, habilidades, buffs, auras, mecánicas y reglas, y gestiona bandas, jugadores y asistencia. Incluye menú flotante, gestor de botín, spammers, temporizador DBM y una barra de acciones de raid." },
+                    { title = "Acerca de", content = "RaidDominion v3.2.0 es un gestor de banda para World of Warcraft 3.3.5a (WotLK, esMX).\nOrganiza roles, habilidades, buffs, auras, mecánicas y reglas, y gestiona bandas, jugadores y asistencia. Incluye menú flotante, gestor de botín, spammers, temporizador DBM y una barra de acciones de raid." },
                     { title = "Primeros pasos y comandos", content = "Al entrar verás el menú flotante (si 'Mostrar menú flotante al iniciar' está activo). Clic izquierdo navega o ejecuta; clic derecho vuelve al menú anterior; arrastra el menú para moverlo.\nComandos:\n/rd - muestra/oculta el menú flotante\n/rdc - abre/cierra la configuración\n/rdh - muestra el resumen de comandos\n/rdloot - abre el gestor de botín\n/rdminimap - muestra/oculta el botón del minimapa\nSubcomandos de /rd: c (config), loot (o botin), help (o h o ?)" },
                     { title = "Menú flotante", content = "El menú agrupa: Roles, Habilidades, Buffs, Auras, Mecánicas, Reglas, Bandas y RaidDominion.\nLos ítems asignables: selecciona un objetivo y pulsa el icono del ítem para asignárselo (o desasignarlo); el clic en el texto lo anuncia por el canal configurado.\nLa barra inferior reúne las acciones de raid (ver 'Barra de acciones y temporizador DBM')." },
                     { title = "Configuración", content = "Ábrela con /rdc o desde el menú flotante / la barra de acciones.\nPestañas: General, Bandas, Habilidades, Roles, Buffs, Auras, Mecánicas, Reglas y Ayuda.\nLa barra inferior replica las acciones de raid: pulsa un icono para ver los AJUSTES de ese botón (no ejecuta la acción; para ejecutarla usa la barra del menú flotante). Arrastra el agarre para reordenarla (afecta también al menú flotante).\nEl botón 'Restablecer valores por defecto' (tab General) borra toda la configuración Y tus datos: bandas, registro, personajes y metas." },

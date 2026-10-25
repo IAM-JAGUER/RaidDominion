@@ -231,7 +231,8 @@ local function OnEnter(self)
     -- aparece si tiene datos). Solo seguimiento OPT-IN: objetos → monedas →
     -- instancias → nota en seguimiento. El equipamiento completo y las notas
     -- del personaje NO van aquí: son datos PASIVOS disponibles en el SV
-    -- (registry[key].player). El bloque de instancias lo decide el propio
+    -- (characters[key].equipment y registry[key].player.note). El bloque de
+    -- instancias lo decide el propio
     -- módulo (check general de la sección Instancias, activado por defecto):
     -- TooltipLines devuelve nil cuando el check está apagado.
     local first = true

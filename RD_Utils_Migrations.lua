@@ -124,6 +124,22 @@ local function MigrateRegistryPerCharacter(db)
     db.registry = container
 end
 
+-- Limpia del registro los bloques que ya viven en fuentes compartidas y que
+-- versiones anteriores duplicaban por personaje (assignments, bands, spammer).
+-- Idempotente y barato; se ejecuta en cada carga para que los SV antiguos no
+-- conserven copias obsoletas.
+local function PruneRegistrySharedData(db)
+    local reg = db.registry
+    if type(reg) ~= "table" then return end
+    for _, tree in pairs(reg) do
+        if type(tree) == "table" then
+            tree.assignments = nil
+            tree.bands = nil
+            tree.spammer = nil
+        end
+    end
+end
+
 -- Aplica todas las migraciones y saneos. Son idempotentes: las de "una sola
 -- vez" usan flags en la DB; el dedup de reglas/mecánicas se ejecuta en cada
 -- carga porque es barato y distintos caminos pueden re-introducir duplicados.
@@ -131,6 +147,7 @@ function Migrations:Run(db, defaults)
     if not db or type(defaults) ~= "table" then return end
 
     MigrateRegistryPerCharacter(db)
+    PruneRegistrySharedData(db)
     CleanAssignments(db)
 
     -- Migración (una sola vez): siembra las notas globales por personaje desde
